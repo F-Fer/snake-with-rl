@@ -1,0 +1,11 @@
+[project]
+name = "snake-env"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "gymnasium>=0.28.1",
+    "numpy>=1.21.0",
+    "pygame>=2.1.0",
+]
