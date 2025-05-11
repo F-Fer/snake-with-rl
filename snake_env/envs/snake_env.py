@@ -315,7 +315,6 @@ class SnakeEnv(gym.Env):
         
         # Score and game status
         self.score = 0
-        self.steps_without_food = 0
         self.game_over = False
         
         # Add initial body segments behind the head
@@ -627,17 +626,6 @@ class SnakeEnv(gym.Env):
         # Make sure we always have the minimum number of food items
         while len(self.food_positions) < self.num_foods:
             self._place_food()
-        
-        # Increment step counter
-        if not food_eaten:
-            self.steps_without_food += 1
-            reward -= 0.01  # Small penalty for each step to encourage efficiency
-            
-            # End episode if snake is wandering too long without food (prevent infinite games)
-            if self.steps_without_food > 3000:
-                terminated = True
-        else:
-            self.steps_without_food = 0
         
         # For compatibility with Gymnasium
         truncated = False

@@ -7,7 +7,7 @@ import math
 def play_snake():
     # Create environment with multiple bot snakes and multiple food items
     # Using a larger world size (3000x3000 pixels)
-    env = gym.make('Snake-v0', render_mode='human', num_bots=5, num_foods=20, world_size=3000)
+    env = gym.make('Snake-v0', render_mode='human', num_bots=0, num_foods=20, world_size=3000)
     
     # Get the window dimensions from PyGame once it's been initialized
     observation, info = env.reset()
