@@ -203,10 +203,9 @@ class BotSnake:
 class SnakeEnv(gym.Env):
     metadata = {'render_modes': ['human', 'rgb_array'], 'render_fps': 15}
     
-    def __init__(self, render_mode=None, width=800, height=600, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10):
+    def __init__(self, render_mode=None, screen_size=800, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10):
         # Screen dimensions (viewport)
-        self.screen_width = width
-        self.screen_height = height
+        self.screen_size = screen_size
         
         # World dimensions (larger than screen)
         self.world_width = world_size
@@ -311,8 +310,8 @@ class SnakeEnv(gym.Env):
         self.direction_vector = (math.cos(self.direction_angle), math.sin(self.direction_angle))
         
         # Initialize camera to center on snake head
-        self.camera_x = center_x - self.screen_width // 2
-        self.camera_y = center_y - self.screen_height // 2
+        self.camera_x = center_x - self.screen_size // 2
+        self.camera_y = center_y - self.screen_size // 2
         
         # Score and game status
         self.score = 0
@@ -339,7 +338,7 @@ class SnakeEnv(gym.Env):
         if self.render_mode == "human" and self.window is None:
             pygame.init()
             pygame.display.init()
-            self.window = pygame.display.set_mode((self.screen_width, self.screen_height))
+            self.window = pygame.display.set_mode((self.screen_size, self.screen_size))
             pygame.display.set_caption("Snake.io")
         if self.render_mode == "human" and self.clock is None:
             self.clock = pygame.time.Clock()
@@ -435,8 +434,8 @@ class SnakeEnv(gym.Env):
         self.snake_body[0] = (new_head_x, new_head_y)
         
         # Update camera position to center on snake head
-        self.camera_x = new_head_x - self.screen_width // 2
-        self.camera_y = new_head_y - self.screen_height // 2
+        self.camera_x = new_head_x - self.screen_size // 2
+        self.camera_y = new_head_y - self.screen_size // 2
         
         # Move each body segment towards the segment in front of it
         for i in range(len(self.snake_body) - 1, 0, -1):
@@ -660,33 +659,33 @@ class SnakeEnv(gym.Env):
         if self.window is None and self.render_mode == "human":
             pygame.init()
             pygame.display.init()
-            self.window = pygame.display.set_mode((self.screen_width, self.screen_height))
+            self.window = pygame.display.set_mode((self.screen_size, self.screen_size))
         if self.clock is None and self.render_mode == "human":
             self.clock = pygame.time.Clock()
             
-        canvas = pygame.Surface((self.screen_width, self.screen_height))
+        canvas = pygame.Surface((self.screen_size, self.screen_size))
         canvas.fill(self.bg_color)  # Dark background
         
         # Calculate visible area boundaries in world coordinates
         view_left = self.camera_x
-        view_right = self.camera_x + self.screen_width
+        view_right = self.camera_x + self.screen_size
         view_top = self.camera_y
-        view_bottom = self.camera_y + self.screen_height
+        view_bottom = self.camera_y + self.screen_size
         
         # Draw grid for continuous space feel - adjusting for camera position
         grid_start_x = (int(view_left) // self.grid_spacing) * self.grid_spacing - int(view_left)
         grid_start_y = (int(view_top) // self.grid_spacing) * self.grid_spacing - int(view_top)
         
-        for x in range(grid_start_x, self.screen_width + self.grid_spacing, self.grid_spacing):
-            pygame.draw.line(canvas, self.grid_color, (x, 0), (x, self.screen_height))
-        for y in range(grid_start_y, self.screen_height + self.grid_spacing, self.grid_spacing):
-            pygame.draw.line(canvas, self.grid_color, (0, y), (self.screen_width, y))
+        for x in range(grid_start_x, self.screen_size + self.grid_spacing, self.grid_spacing):
+            pygame.draw.line(canvas, self.grid_color, (x, 0), (x, self.screen_size))
+        for y in range(grid_start_y, self.screen_size + self.grid_spacing, self.grid_spacing):
+            pygame.draw.line(canvas, self.grid_color, (0, y), (self.screen_size, y))
         
         # Draw world boundaries
         bound_left = max(0, -view_left)
-        bound_right = min(self.screen_width, self.world_width - view_left)
+        bound_right = min(self.screen_size, self.world_width - view_left)
         bound_top = max(0, -view_top)
-        bound_bottom = min(self.screen_height, self.world_height - view_top)
+        bound_bottom = min(self.screen_size, self.world_height - view_top)
         
         # Draw world border (a bit thicker to be visible)
         border_color = (60, 60, 80)  # Bluish-gray
@@ -694,19 +693,19 @@ class SnakeEnv(gym.Env):
         
         # Left border
         if view_left <= 0:
-            pygame.draw.line(canvas, border_color, (bound_left, 0), (bound_left, self.screen_height), border_thickness)
+            pygame.draw.line(canvas, border_color, (bound_left, 0), (bound_left, self.screen_size), border_thickness)
         
         # Right border
         if view_right >= self.world_width:
-            pygame.draw.line(canvas, border_color, (bound_right, 0), (bound_right, self.screen_height), border_thickness)
+            pygame.draw.line(canvas, border_color, (bound_right, 0), (bound_right, self.screen_size), border_thickness)
         
         # Top border
         if view_top <= 0:
-            pygame.draw.line(canvas, border_color, (0, bound_top), (self.screen_width, bound_top), border_thickness)
+            pygame.draw.line(canvas, border_color, (0, bound_top), (self.screen_size, bound_top), border_thickness)
         
         # Bottom border
         if view_bottom >= self.world_height:
-            pygame.draw.line(canvas, border_color, (0, bound_bottom), (self.screen_width, bound_bottom), border_thickness)
+            pygame.draw.line(canvas, border_color, (0, bound_bottom), (self.screen_size, bound_bottom), border_thickness)
         
         # Draw bot snakes
         for bot in self.bots:
@@ -717,8 +716,8 @@ class SnakeEnv(gym.Env):
                 screen_y = int(y - view_top)
                 
                 # Skip drawing if outside screen
-                if (screen_x < -bot.segment_radius or screen_x > self.screen_width + bot.segment_radius or
-                    screen_y < -bot.segment_radius or screen_y > self.screen_height + bot.segment_radius):
+                if (screen_x < -bot.segment_radius or screen_x > self.screen_size + bot.segment_radius or
+                    screen_y < -bot.segment_radius or screen_y > self.screen_size + bot.segment_radius):
                     continue
                 
                 # Gradient color from tail to head
@@ -760,8 +759,8 @@ class SnakeEnv(gym.Env):
             screen_y = int(y - view_top)
             
             # Skip drawing if outside screen
-            if (screen_x < -self.snake_segment_radius or screen_x > self.screen_width + self.snake_segment_radius or
-                screen_y < -self.snake_segment_radius or screen_y > self.screen_height + self.snake_segment_radius):
+            if (screen_x < -self.snake_segment_radius or screen_x > self.screen_size + self.snake_segment_radius or
+                screen_y < -self.snake_segment_radius or screen_y > self.screen_size + self.snake_segment_radius):
                 continue
             
             # Gradient color from tail to head (darker to brighter green)
@@ -803,8 +802,8 @@ class SnakeEnv(gym.Env):
             screen_y = int(food_y - view_top)
             
             # Skip if outside screen
-            if (screen_x < -self.food_radius or screen_x > self.screen_width + self.food_radius or
-                screen_y < -self.food_radius or screen_y > self.screen_height + self.food_radius):
+            if (screen_x < -self.food_radius or screen_x > self.screen_size + self.food_radius or
+                screen_y < -self.food_radius or screen_y > self.screen_size + self.food_radius):
                 continue
             
             # Draw a glowing effect for food
@@ -822,7 +821,7 @@ class SnakeEnv(gym.Env):
         # Draw minimap if enabled
         if self.show_minimap:
             minimap_rect = pygame.Rect(
-                self.screen_width - self.minimap_size - self.minimap_padding,
+                self.screen_size - self.minimap_size - self.minimap_padding,
                 self.minimap_padding,
                 self.minimap_size,
                 self.minimap_size
@@ -846,8 +845,8 @@ class SnakeEnv(gym.Env):
             viewport_rect = pygame.Rect(
                 minimap_rect.x + int(view_left * scale_x),
                 minimap_rect.y + int(view_top * scale_y),
-                int(self.screen_width * scale_x),
-                int(self.screen_height * scale_y)
+                int(self.screen_size * scale_x),
+                int(self.screen_size * scale_y)
             )
             pygame.draw.rect(canvas, (255, 255, 255), viewport_rect, 1)
             
