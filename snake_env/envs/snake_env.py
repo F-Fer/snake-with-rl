@@ -202,12 +202,16 @@ class BotSnake:
 
 class SnakeEnv(gym.Env):
     metadata = {'render_modes': ['rgb_array']}
+
+    # Reward constants
+    C1 = 0.1  # For change in length
+    C2 = 10   # For eliminating an opponent
+    C3 = 100  # For death
     
     def __init__(self, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10, screen_size=84, zoom_level=1.0):
-        # Screen dimensions (viewport for rendering the 84x84 observation)
-        self.screen_size = screen_size  # Fixed screen size for observation (final output)
-        self.render_mode = "rgb_array" # Fixed render_mode
-        self.zoom_level = zoom_level # Zoom level for observation
+        self.screen_size = screen_size  
+        self.render_mode = "rgb_array" 
+        self.zoom_level = zoom_level 
         
         # World dimensions (larger than screen)
         self.world_width = world_size
@@ -224,7 +228,7 @@ class SnakeEnv(gym.Env):
         
         # Turning agility parameters
         self.initial_snake_length = 4  # 1 head + 3 initial segments
-        self.base_max_turn_per_frame = math.pi / 24  # 60 degrees for initial length
+        self.base_max_turn_per_frame = math.pi / 24 
         self.turn_agility_decay_factor = 0.05 # Determines how fast agility drops with length
         self.min_allowable_turn_per_frame = math.pi / 36 # Min turn of 5 degrees, regardless of length
         
@@ -234,11 +238,11 @@ class SnakeEnv(gym.Env):
         self.bot_respawn_time = 300  # Number of steps before respawning a bot
         self.bot_respawn_counter = {}  # Maps bot_id to respawn countdown
         
-        # Observation space: 84x84x3 image
+        # Observation space: screen_size x screen_size x 3 image
         self.observation_space = spaces.Box(
             low=0,
             high=255,
-            shape=(84, 84, 3),
+            shape=(screen_size, screen_size, 3),
             dtype=np.uint8
         )
         
@@ -255,10 +259,7 @@ class SnakeEnv(gym.Env):
         
         # Initialize game state
         self.reset()
-        
-    def _get_obs(self):
-        # This method is no longer used as observation is the rendered frame
-        pass
+
     
     def _get_info(self):
         return {
@@ -270,6 +271,7 @@ class SnakeEnv(gym.Env):
             'num_foods': len(self.food_positions)
         }
         
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
@@ -286,7 +288,7 @@ class SnakeEnv(gym.Env):
         # Calculate direction vector
         self.direction_vector = (math.cos(self.direction_angle), math.sin(self.direction_angle))
         
-        # Initialize camera to center on snake head, considering zoom
+        # Initialize camera to center on snake head
         self.camera_x = center_x - self.effective_view_span // 2
         self.camera_y = center_y - self.effective_view_span // 2
         
@@ -296,7 +298,7 @@ class SnakeEnv(gym.Env):
         self.previous_length = 3 # Initial length
         
         # Add initial body segments behind the head
-        self._add_initial_segments(3)  # Start with 4 segments total (1 head + 3 body)
+        self._add_initial_segments(3)
         
         # Initialize bot snakes first (needed before placing food)
         self.bots = []
@@ -311,13 +313,13 @@ class SnakeEnv(gym.Env):
         for _ in range(self.num_foods):
             self._place_food()
         
-        observation = self._render_frame() # Observation is now the rendered image
+        observation = self._render_frame()
         info = self._get_info()
         
         return observation, info
     
+    
     def _add_initial_segments(self, count):
-        # Add initial body segments behind the head
         head_x, head_y = self.snake_body[0]
         angle = self.direction_angle + math.pi  # Opposite direction of head
         
@@ -327,6 +329,7 @@ class SnakeEnv(gym.Env):
             y = head_y + math.sin(angle) * offset
             self.snake_body.append((float(x), float(y)))
     
+
     def _place_food(self):
         # Place food at a random position that is not too close to the snake
         min_distance = self.snake_segment_radius * 3
@@ -372,10 +375,11 @@ class SnakeEnv(gym.Env):
         food_y = self.np_random.uniform(self.food_radius, self.world_height - self.food_radius)
         self.food_positions.append((food_x, food_y))
     
+
     def step(self, action):
         # Check if game is already over
         if self.game_over:
-            observation = self._render_frame() # Get current rendered frame
+            observation = self._render_frame()
             info = self._get_info()
             return observation, 0, True, False, info
         
@@ -383,18 +387,10 @@ class SnakeEnv(gym.Env):
         cos_val = action[0]
         sin_val = action[1]
 
-        # Normalize to ensure it's a unit vector, though not strictly necessary if model learns properly
-        # magnitude = math.sqrt(cos_val**2 + sin_val**2)
-        # if magnitude == 0: # Avoid division by zero, maintain current direction
-        #     pass # direction_vector remains unchanged
-        # else:
-        #     self.direction_vector = (cos_val / magnitude, sin_val / magnitude)
-        # self.direction_angle = math.atan2(self.direction_vector[1], self.direction_vector[0])
-
         # Directly use atan2 to get the target angle
         target_angle = math.atan2(sin_val, cos_val)
 
-        # Smoothly turn towards the target_angle, respecting max_turn_per_frame
+        # Smoothly turn towards the target_angle
         current_angle_rad = self.direction_angle % (2 * math.pi)
         target_angle_rad = target_angle % (2 * math.pi)
 
@@ -424,7 +420,7 @@ class SnakeEnv(gym.Env):
         # Update head position
         self.snake_body[0] = (new_head_x, new_head_y)
         
-        # Update camera position to center on snake head, considering zoom
+        # Update camera position to center on snake head
         self.camera_x = new_head_x - self.effective_view_span // 2
         self.camera_y = new_head_y - self.effective_view_span // 2
         
@@ -448,12 +444,7 @@ class SnakeEnv(gym.Env):
         # Initialize reward and terminated status
         reward = 0
         terminated = False
-        current_length = len(self.snake_body) # For C1 reward
-
-        # Reward constants (can be tuned)
-        C1 = 0.1  # For change in length
-        C2 = 10   # For eliminating an opponent
-        C3 = 100  # For death
+        current_length = len(self.snake_body)
 
         # Check for collisions with walls
         head_x, head_y = self.snake_body[0]
@@ -466,7 +457,7 @@ class SnakeEnv(gym.Env):
         
         if wall_collision:
             self.game_over = True
-            reward -= C3  # Penalty for hitting wall (death)
+            reward -= self.C3 
             terminated = True
         
         # Check for collisions with bot snakes
@@ -491,7 +482,7 @@ class SnakeEnv(gym.Env):
                 if len(self.snake_body) > len(bot.body):
                     # Player kills bot
                     killed_bots.append(bot_idx)
-                    reward += C2 * len(bot.body)  # Reward for eliminating opponent
+                    reward += self.C2 * len(bot.body)  # Reward for eliminating opponent
                 else:
                     # Bot kills player
                     bot_collision = True
@@ -523,7 +514,7 @@ class SnakeEnv(gym.Env):
         
         if bot_collision:
             self.game_over = True
-            reward -= C3  # Penalty for hitting a bot (death)
+            reward -= self.C3 
             terminated = True
         else:
             terminated = False
@@ -531,7 +522,7 @@ class SnakeEnv(gym.Env):
             
         # Calculate length change reward (C1)
         length_change = current_length - self.previous_length
-        reward += C1 * length_change
+        reward += self.C1 * length_change
         self.previous_length = current_length
             
         # Check for food collection by player
@@ -543,7 +534,6 @@ class SnakeEnv(gym.Env):
             
             if food_distance < self.snake_segment_radius + self.food_radius:
                 self.score += 1
-                # reward += 10  # Reward for eating food is now handled by length change (C1)
                 food_eaten = True
                 
                 # Remove the eaten food
@@ -574,7 +564,7 @@ class SnakeEnv(gym.Env):
         while len(self.food_positions) < self.num_foods:
             self._place_food()
             
-        # Update bot snakes - but don't end the game if they collide
+        # Update bot snakes 
         bot_food_eaten = []  # Track food eaten by bots
         bots_to_remove = []  # Track bots that need to be removed
         
@@ -633,29 +623,13 @@ class SnakeEnv(gym.Env):
         # For compatibility with Gymnasium
         truncated = False
 
-        # Render if needed (always rgb_array now)
-        # if self.render_mode == "human": # Human mode removed
-        #     self._render_frame()
-
-        observation = self._render_frame() # Observation is always the rendered image
+        observation = self._render_frame()
         info = self._get_info()
 
         return observation, reward, terminated, truncated, info
     
-    def render(self):
-        if self.render_mode == "rgb_array":
-            return self._render_frame()
-        # No other render modes supported
-        return None # Or raise an error
 
     def _render_frame(self):
-        # if self.window is None and self.render_mode == "human": # Human mode removed
-        #     pygame.init()
-        #     pygame.display.init()
-        #     self.window = pygame.display.set_mode((self.screen_size, self.screen_size))
-        # if self.clock is None and self.render_mode == "human": # Human mode removed
-        #     self.clock = pygame.time.Clock()
-
         # Determine dimensions of the intermediate rendering surface based on zoom
         render_surface_dim = self.effective_view_span
         temp_canvas = pygame.Surface((render_surface_dim, render_surface_dim))
@@ -822,9 +796,4 @@ class SnakeEnv(gym.Env):
         )
 
     def close(self):
-        # if self.window is not None: # Human mode window removed
-            # pygame.display.quit()
-            # pygame.quit() # Pygame is quit globally now
-            # self.window = None
-            # self.clock = None
-        pygame.quit() # Quit Pygame when env is closed
+        pygame.quit() 
