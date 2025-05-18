@@ -201,7 +201,7 @@ class BotSnake:
         return False, eaten_food_indices  # Bot is alive, return which food it ate
 
 class SnakeEnv(gym.Env):
-    metadata = {'render_modes': ['rgb_array'], 'render_fps': 15}
+    metadata = {'render_modes': ['rgb_array']}
     
     def __init__(self, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10, screen_size=84, zoom_level=1.0):
         # Screen dimensions (viewport for rendering the 84x84 observation)
@@ -222,8 +222,11 @@ class SnakeEnv(gym.Env):
         self.snake_speed = 3  # Pixels per step
         self.min_distance_between_segments = snake_segment_radius * 1.5
         
-        # Maximum turning angle per frame (in radians)
-        self.max_turn_per_frame = math.pi / 3  # 60 degrees
+        # Turning agility parameters
+        self.initial_snake_length = 4  # 1 head + 3 initial segments
+        self.base_max_turn_per_frame = math.pi / 24  # 60 degrees for initial length
+        self.turn_agility_decay_factor = 0.05 # Determines how fast agility drops with length
+        self.min_allowable_turn_per_frame = math.pi / 36 # Min turn of 5 degrees, regardless of length
         
         # Bot settings
         self.num_bots = num_bots
@@ -401,8 +404,14 @@ class SnakeEnv(gym.Env):
         elif angle_diff < -math.pi:
             angle_diff += 2 * math.pi
 
+        # Calculate dynamic max turn per frame based on snake length
+        current_length = len(self.snake_body)
+        length_effect = max(0, current_length - self.initial_snake_length)
+        dynamic_max_turn = self.base_max_turn_per_frame / (1 + self.turn_agility_decay_factor * length_effect)
+        effective_max_turn_per_frame = max(self.min_allowable_turn_per_frame, dynamic_max_turn)
+        
         # Apply max turn limit
-        turn_this_frame = max(-self.max_turn_per_frame, min(self.max_turn_per_frame, angle_diff))
+        turn_this_frame = max(-effective_max_turn_per_frame, min(effective_max_turn_per_frame, angle_diff))
         
         self.direction_angle = (self.direction_angle + turn_this_frame) % (2 * math.pi)
         self.direction_vector = (math.cos(self.direction_angle), math.sin(self.direction_angle))
