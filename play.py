@@ -6,28 +6,24 @@ import math
 import numpy as np
 
 def play_snake():
-    # Create environment. render_mode is now fixed in the env.
-    # screen_size for observation is defined in env. world_size can still be large.
     env = gym.make('Snake-v0', num_bots=3, num_foods=20, world_size=3000, screen_size=256, zoom_level=1.0)
 
-    # --- Pygame setup for displaying the observation ---
     pygame.init()
-    display_width = 600  # Width of the window to show the game
-    display_height = 600 # Height of the window to show the game
+    display_width = 600  
+    display_height = 600 
     screen = pygame.display.set_mode((display_width, display_height))
     pygame.display.set_caption("Snake RL Environment Viewer")
     clock = pygame.time.Clock()
-    # Center of the display window (for mouse control)
+    # Center of the display window
     display_center_x = display_width // 2
     display_center_y = display_height // 2
-    # --- End Pygame setup ---
 
-    observation, info = env.reset() # Observation is an image
+    observation, info = env.reset() 
 
     # Game loop
     running = True
     
-    target_direction_angle = 0.0 # Initial angle, will be updated by mouse
+    target_direction_angle = 0.0 # Initial angle
 
     print("Welcome to Snake.io RL Viewer!")
     print("Use MOUSE to control snake direction.")
@@ -74,20 +70,19 @@ def play_snake():
         if terminated or truncated:
             print(f"\nGame Over! Final Score: {info['score']}")
             print(f"Frame count: {frame_count}")
-            print(f"terminated: {terminated}, truncated: {truncated}")
+            print(f"Terminated: {terminated}, truncated: {truncated}")
             time.sleep(2)
             observation, info = env.reset()
-            # target_direction_angle will be updated by mouse on next frame
             
 
-        # --- Display the observation from the environment ---
+        # Display the observation from the environment
         if observation is not None:
             obs_surface = pygame.surfarray.make_surface(observation) 
             scaled_surface = pygame.transform.scale(obs_surface, (display_width, display_height))
             screen.blit(scaled_surface, (0, 0))
         
         pygame.display.flip()
-        clock.tick(60) # Limit FPS for the display window for smoother mouse input processing
+        clock.tick(60) # Limit FPS
         frame_count += 1
 
     env.close()
