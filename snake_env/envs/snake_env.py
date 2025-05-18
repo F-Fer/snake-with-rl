@@ -201,11 +201,13 @@ class BotSnake:
         return False, eaten_food_indices  # Bot is alive, return which food it ate
 
 class SnakeEnv(gym.Env):
-    metadata = {'render_modes': ['human', 'rgb_array'], 'render_fps': 15}
+    metadata = {'render_modes': ['rgb_array'], 'render_fps': 15}
     
-    def __init__(self, render_mode=None, screen_size=800, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10):
-        # Screen dimensions (viewport)
-        self.screen_size = screen_size
+    def __init__(self, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10, screen_size=84, zoom_level=1.0):
+        # Screen dimensions (viewport for rendering the 84x84 observation)
+        self.screen_size = screen_size  # Fixed screen size for observation (final output)
+        self.render_mode = "rgb_array" # Fixed render_mode
+        self.zoom_level = zoom_level # Zoom level for observation
         
         # World dimensions (larger than screen)
         self.world_width = world_size
@@ -229,59 +231,31 @@ class SnakeEnv(gym.Env):
         self.bot_respawn_time = 300  # Number of steps before respawning a bot
         self.bot_respawn_counter = {}  # Maps bot_id to respawn countdown
         
-        # Observation space: position of snake head, direction, and closest food
+        # Observation space: 84x84x3 image
         self.observation_space = spaces.Box(
-            low=np.array([0, 0, 0, 0, 0]),
-            high=np.array([self.world_width, self.world_height, 2*math.pi, self.world_width, self.world_height]),
-            dtype=np.float32
+            low=0,
+            high=255,
+            shape=(84, 84, 3),
+            dtype=np.uint8
         )
         
-        # Action space: 24 discrete directions (-180 to +165 degrees in 15-degree increments relative to current heading)
-        # 0 = -180°, 1 = -165°, ..., 12 = 0° (no turn), ..., 23 = +165°
-        self.action_space = spaces.Discrete(24)
-        
-        # Render mode
-        assert render_mode is None or render_mode in self.metadata["render_modes"]
-        self.render_mode = render_mode
-        
-        # For rendering
-        self.window = None
-        self.clock = None
+        # Action space: two continuous values (sine and cosine) for direction
+        self.action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
         
         # Background for continuous space feel
         self.bg_color = (20, 20, 20)
         self.grid_spacing = 40
         self.grid_color = (30, 30, 30)
-        
-        # Minimap settings
-        self.show_minimap = True
-        self.minimap_size = 150  # Size of the minimap square
-        self.minimap_padding = 10  # Padding from the edge
+
+        # Calculate the effective span of the world that the camera will see for the intermediate render surface
+        self.effective_view_span = int(self.screen_size * self.zoom_level)
         
         # Initialize game state
         self.reset()
         
     def _get_obs(self):
-        # Return head position, direction angle, and closest food position
-        head_x, head_y = self.snake_body[0]
-        
-        # Find closest food
-        closest_food = self.food_positions[0] if self.food_positions else (self.width/2, self.height/2)
-        closest_distance = float('inf')
-        
-        for food_pos in self.food_positions:
-            distance = math.sqrt((head_x - food_pos[0])**2 + (head_y - food_pos[1])**2)
-            if distance < closest_distance:
-                closest_distance = distance
-                closest_food = food_pos
-        
-        return np.array([
-            head_x, 
-            head_y, 
-            self.direction_angle,
-            closest_food[0],
-            closest_food[1]
-        ], dtype=np.float32)
+        # This method is no longer used as observation is the rendered frame
+        pass
     
     def _get_info(self):
         return {
@@ -309,13 +283,14 @@ class SnakeEnv(gym.Env):
         # Calculate direction vector
         self.direction_vector = (math.cos(self.direction_angle), math.sin(self.direction_angle))
         
-        # Initialize camera to center on snake head
-        self.camera_x = center_x - self.screen_size // 2
-        self.camera_y = center_y - self.screen_size // 2
+        # Initialize camera to center on snake head, considering zoom
+        self.camera_x = center_x - self.effective_view_span // 2
+        self.camera_y = center_y - self.effective_view_span // 2
         
         # Score and game status
         self.score = 0
         self.game_over = False
+        self.previous_length = 3 # Initial length
         
         # Add initial body segments behind the head
         self._add_initial_segments(3)  # Start with 4 segments total (1 head + 3 body)
@@ -333,16 +308,7 @@ class SnakeEnv(gym.Env):
         for _ in range(self.num_foods):
             self._place_food()
         
-        # Reset render components
-        if self.render_mode == "human" and self.window is None:
-            pygame.init()
-            pygame.display.init()
-            self.window = pygame.display.set_mode((self.screen_size, self.screen_size))
-            pygame.display.set_caption("Snake.io")
-        if self.render_mode == "human" and self.clock is None:
-            self.clock = pygame.time.Clock()
-            
-        observation = self._get_obs()
+        observation = self._render_frame() # Observation is now the rendered image
         info = self._get_info()
         
         return observation, info
@@ -406,22 +372,39 @@ class SnakeEnv(gym.Env):
     def step(self, action):
         # Check if game is already over
         if self.game_over:
-            observation = self._get_obs()
+            observation = self._render_frame() # Get current rendered frame
             info = self._get_info()
             return observation, 0, True, False, info
         
-        # Convert action to angle change relative to current direction
-        # Action is now relative to current direction (-180 to +165 degrees)
-        # 0-11 = turn left (-180 to -15 degrees)
-        # 12 = no turn (0 degrees)
-        # 13-23 = turn right (+15 to +165 degrees)
-        angle_change = (action - 12) * (math.pi / 12.0)  # 15 degree increments
+        # Action is [cos_val, sin_val]
+        cos_val = action[0]
+        sin_val = action[1]
+
+        # Normalize to ensure it's a unit vector, though not strictly necessary if model learns properly
+        # magnitude = math.sqrt(cos_val**2 + sin_val**2)
+        # if magnitude == 0: # Avoid division by zero, maintain current direction
+        #     pass # direction_vector remains unchanged
+        # else:
+        #     self.direction_vector = (cos_val / magnitude, sin_val / magnitude)
+        # self.direction_angle = math.atan2(self.direction_vector[1], self.direction_vector[0])
+
+        # Directly use atan2 to get the target angle
+        target_angle = math.atan2(sin_val, cos_val)
+
+        # Smoothly turn towards the target_angle, respecting max_turn_per_frame
+        current_angle_rad = self.direction_angle % (2 * math.pi)
+        target_angle_rad = target_angle % (2 * math.pi)
+
+        angle_diff = target_angle_rad - current_angle_rad
+        if angle_diff > math.pi:
+            angle_diff -= 2 * math.pi
+        elif angle_diff < -math.pi:
+            angle_diff += 2 * math.pi
+
+        # Apply max turn limit
+        turn_this_frame = max(-self.max_turn_per_frame, min(self.max_turn_per_frame, angle_diff))
         
-        # Limit angle change to max_turn_per_frame
-        angle_change = max(-self.max_turn_per_frame, min(self.max_turn_per_frame, angle_change))
-        
-        # Update direction angle and vector
-        self.direction_angle = (self.direction_angle + angle_change) % (2 * math.pi)
+        self.direction_angle = (self.direction_angle + turn_this_frame) % (2 * math.pi)
         self.direction_vector = (math.cos(self.direction_angle), math.sin(self.direction_angle))
         
         # Move snake head
@@ -429,12 +412,12 @@ class SnakeEnv(gym.Env):
         new_head_x = head_x + self.direction_vector[0] * self.snake_speed
         new_head_y = head_y + self.direction_vector[1] * self.snake_speed
         
-        # Insert new head position
+        # Update head position
         self.snake_body[0] = (new_head_x, new_head_y)
         
-        # Update camera position to center on snake head
-        self.camera_x = new_head_x - self.screen_size // 2
-        self.camera_y = new_head_y - self.screen_size // 2
+        # Update camera position to center on snake head, considering zoom
+        self.camera_x = new_head_x - self.effective_view_span // 2
+        self.camera_y = new_head_y - self.effective_view_span // 2
         
         # Move each body segment towards the segment in front of it
         for i in range(len(self.snake_body) - 1, 0, -1):
@@ -456,7 +439,13 @@ class SnakeEnv(gym.Env):
         # Initialize reward and terminated status
         reward = 0
         terminated = False
-        
+        current_length = len(self.snake_body) # For C1 reward
+
+        # Reward constants (can be tuned)
+        C1 = 0.1  # For change in length
+        C2 = 10   # For eliminating an opponent
+        C3 = 100  # For death
+
         # Check for collisions with walls
         head_x, head_y = self.snake_body[0]
         wall_collision = (
@@ -468,7 +457,7 @@ class SnakeEnv(gym.Env):
         
         if wall_collision:
             self.game_over = True
-            reward = -10  # Penalty for hitting wall
+            reward -= C3  # Penalty for hitting wall (death)
             terminated = True
         
         # Check for collisions with bot snakes
@@ -493,7 +482,7 @@ class SnakeEnv(gym.Env):
                 if len(self.snake_body) > len(bot.body):
                     # Player kills bot
                     killed_bots.append(bot_idx)
-                    reward += 5  # Bonus for killing a bot
+                    reward += C2 * len(bot.body)  # Reward for eliminating opponent
                 else:
                     # Bot kills player
                     bot_collision = True
@@ -525,11 +514,16 @@ class SnakeEnv(gym.Env):
         
         if bot_collision:
             self.game_over = True
-            reward = -10  # Penalty for hitting a bot
+            reward -= C3  # Penalty for hitting a bot (death)
             terminated = True
         else:
             terminated = False
             reward = 0
+            
+        # Calculate length change reward (C1)
+        length_change = current_length - self.previous_length
+        reward += C1 * length_change
+        self.previous_length = current_length
             
         # Check for food collection by player
         head_x, head_y = self.snake_body[0]
@@ -540,7 +534,7 @@ class SnakeEnv(gym.Env):
             
             if food_distance < self.snake_segment_radius + self.food_radius:
                 self.score += 1
-                reward += 10  # Reward for eating food
+                # reward += 10  # Reward for eating food is now handled by length change (C1)
                 food_eaten = True
                 
                 # Remove the eaten food
@@ -629,91 +623,96 @@ class SnakeEnv(gym.Env):
         
         # For compatibility with Gymnasium
         truncated = False
-        
-        # Render if needed
-        if self.render_mode == "human":
-            self._render_frame()
-            
-        observation = self._get_obs()
+
+        # Render if needed (always rgb_array now)
+        # if self.render_mode == "human": # Human mode removed
+        #     self._render_frame()
+
+        observation = self._render_frame() # Observation is always the rendered image
         info = self._get_info()
-        
+
         return observation, reward, terminated, truncated, info
     
     def render(self):
         if self.render_mode == "rgb_array":
             return self._render_frame()
-    
+        # No other render modes supported
+        return None # Or raise an error
+
     def _render_frame(self):
-        if self.window is None and self.render_mode == "human":
-            pygame.init()
-            pygame.display.init()
-            self.window = pygame.display.set_mode((self.screen_size, self.screen_size))
-        if self.clock is None and self.render_mode == "human":
-            self.clock = pygame.time.Clock()
-            
-        canvas = pygame.Surface((self.screen_size, self.screen_size))
-        canvas.fill(self.bg_color)  # Dark background
+        # if self.window is None and self.render_mode == "human": # Human mode removed
+        #     pygame.init()
+        #     pygame.display.init()
+        #     self.window = pygame.display.set_mode((self.screen_size, self.screen_size))
+        # if self.clock is None and self.render_mode == "human": # Human mode removed
+        #     self.clock = pygame.time.Clock()
+
+        # Determine dimensions of the intermediate rendering surface based on zoom
+        render_surface_dim = self.effective_view_span
+        temp_canvas = pygame.Surface((render_surface_dim, render_surface_dim))
+        temp_canvas.fill(self.bg_color)  # Dark background
         
-        # Calculate visible area boundaries in world coordinates
-        view_left = self.camera_x
-        view_right = self.camera_x + self.screen_size
-        view_top = self.camera_y
-        view_bottom = self.camera_y + self.screen_size
+        # Calculate visible area boundaries in world coordinates for the temp_canvas
+        view_left = self.camera_x # World coordinate of the left edge of the zoomed view
+        view_top = self.camera_y  # World coordinate of the top edge of the zoomed view
         
-        # Draw grid for continuous space feel - adjusting for camera position
-        grid_start_x = (int(view_left) // self.grid_spacing) * self.grid_spacing - int(view_left)
-        grid_start_y = (int(view_top) // self.grid_spacing) * self.grid_spacing - int(view_top)
+        # Draw grid for continuous space feel - adjusting for camera position on temp_canvas
+        # grid_start_x is the pixel offset on temp_canvas for the first vertical grid line
+        grid_start_x_on_temp_canvas = (int(view_left) // self.grid_spacing) * self.grid_spacing - int(view_left)
+        grid_start_y_on_temp_canvas = (int(view_top) // self.grid_spacing) * self.grid_spacing - int(view_top)
         
-        for x in range(grid_start_x, self.screen_size + self.grid_spacing, self.grid_spacing):
-            pygame.draw.line(canvas, self.grid_color, (x, 0), (x, self.screen_size))
-        for y in range(grid_start_y, self.screen_size + self.grid_spacing, self.grid_spacing):
-            pygame.draw.line(canvas, self.grid_color, (0, y), (self.screen_size, y))
+        for x_on_temp_canvas in range(grid_start_x_on_temp_canvas, render_surface_dim + self.grid_spacing, self.grid_spacing):
+            pygame.draw.line(temp_canvas, self.grid_color, (x_on_temp_canvas, 0), (x_on_temp_canvas, render_surface_dim))
+        for y_on_temp_canvas in range(grid_start_y_on_temp_canvas, render_surface_dim + self.grid_spacing, self.grid_spacing):
+            pygame.draw.line(temp_canvas, self.grid_color, (0, y_on_temp_canvas), (render_surface_dim, y_on_temp_canvas))
         
-        # Draw world boundaries
-        bound_left = max(0, -view_left)
-        bound_right = min(self.screen_size, self.world_width - view_left)
-        bound_top = max(0, -view_top)
-        bound_bottom = min(self.screen_size, self.world_height - view_top)
+        # Draw world boundaries on temp_canvas
+        # These are pixel coordinates on the temp_canvas
+        bound_left_on_temp = max(0, -view_left)
+        bound_right_on_temp = min(render_surface_dim, self.world_width - view_left)
+        bound_top_on_temp = max(0, -view_top)
+        bound_bottom_on_temp = min(render_surface_dim, self.world_height - view_top)
         
-        # Draw world border (a bit thicker to be visible)
         border_color = (60, 60, 80)  # Bluish-gray
-        border_thickness = 3
+        border_thickness = 3 # This will be 3 pixels on temp_canvas, then scaled down
         
         # Left border
         if view_left <= 0:
-            pygame.draw.line(canvas, border_color, (bound_left, 0), (bound_left, self.screen_size), border_thickness)
+            pygame.draw.line(temp_canvas, border_color, (bound_left_on_temp, 0), (bound_left_on_temp, render_surface_dim), border_thickness)
         
         # Right border
-        if view_right >= self.world_width:
-            pygame.draw.line(canvas, border_color, (bound_right, 0), (bound_right, self.screen_size), border_thickness)
+        # Condition for drawing right border: right edge of view (view_left + render_surface_dim) >= world_width
+        if view_left + render_surface_dim >= self.world_width:
+            pygame.draw.line(temp_canvas, border_color, (bound_right_on_temp, 0), (bound_right_on_temp, render_surface_dim), border_thickness)
         
         # Top border
         if view_top <= 0:
-            pygame.draw.line(canvas, border_color, (0, bound_top), (self.screen_size, bound_top), border_thickness)
+            pygame.draw.line(temp_canvas, border_color, (0, bound_top_on_temp), (render_surface_dim, bound_top_on_temp), border_thickness)
         
         # Bottom border
-        if view_bottom >= self.world_height:
-            pygame.draw.line(canvas, border_color, (0, bound_bottom), (self.screen_size, bound_bottom), border_thickness)
+        # Condition for drawing bottom border: bottom edge of view (view_top + render_surface_dim) >= world_height
+        if view_top + render_surface_dim >= self.world_height:
+            pygame.draw.line(temp_canvas, border_color, (0, bound_bottom_on_temp), (render_surface_dim, bound_bottom_on_temp), border_thickness)
         
-        # Draw bot snakes
+        # Draw bot snakes on temp_canvas
         for bot in self.bots:
             # Draw bot body segments
             for i, (x, y) in enumerate(reversed(bot.body)):
-                # Convert world coordinates to screen coordinates
+                # Convert world coordinates to temp_canvas coordinates
                 screen_x = int(x - view_left)
                 screen_y = int(y - view_top)
                 
-                # Skip drawing if outside screen
-                if (screen_x < -bot.segment_radius or screen_x > self.screen_size + bot.segment_radius or
-                    screen_y < -bot.segment_radius or screen_y > self.screen_size + bot.segment_radius):
+                # Skip drawing if outside temp_canvas
+                if (screen_x < -bot.segment_radius or screen_x > render_surface_dim + bot.segment_radius or
+                    screen_y < -bot.segment_radius or screen_y > render_surface_dim + bot.segment_radius):
                     continue
                 
                 # Gradient color from tail to head
                 color_intensity = 0.5 + min(0.5, (i * 0.5) / len(bot.body))
                 color = tuple(int(c * color_intensity) for c in bot.base_color)
                 
-                # Draw circle for segment
-                pygame.draw.circle(canvas, color, (screen_x, screen_y), bot.segment_radius)
+                # Draw circle for segment on temp_canvas (radius is world unit, drawn as pixels)
+                pygame.draw.circle(temp_canvas, color, (screen_x, screen_y), bot.segment_radius)
                 
                 # Draw eyes on head (first segment in reversed list)
                 if i == len(bot.body) - 1:
@@ -732,31 +731,31 @@ class SnakeEnv(gym.Env):
                     right_eye_y = screen_y + math.sin(right_angle) * eye_offset
                     
                     # Draw eyes
-                    pygame.draw.circle(canvas, (255, 255, 255), (int(left_eye_x), int(left_eye_y)), eye_radius)
-                    pygame.draw.circle(canvas, (255, 255, 255), (int(right_eye_x), int(right_eye_y)), eye_radius)
+                    pygame.draw.circle(temp_canvas, (255, 255, 255), (int(left_eye_x), int(left_eye_y)), eye_radius)
+                    pygame.draw.circle(temp_canvas, (255, 255, 255), (int(right_eye_x), int(right_eye_y)), eye_radius)
                     
                     # Draw pupils
                     pupil_radius = eye_radius * 0.6
-                    pygame.draw.circle(canvas, (0, 0, 0), (int(left_eye_x), int(left_eye_y)), pupil_radius)
-                    pygame.draw.circle(canvas, (0, 0, 0), (int(right_eye_x), int(right_eye_y)), pupil_radius)
+                    pygame.draw.circle(temp_canvas, (0, 0, 0), (int(left_eye_x), int(left_eye_y)), pupil_radius)
+                    pygame.draw.circle(temp_canvas, (0, 0, 0), (int(right_eye_x), int(right_eye_y)), pupil_radius)
         
-        # Draw player snake body segments
+        # Draw player snake body segments on temp_canvas
         for i, (x, y) in enumerate(reversed(self.snake_body)):
-            # Convert world coordinates to screen coordinates
+            # Convert world coordinates to temp_canvas coordinates
             screen_x = int(x - view_left)
             screen_y = int(y - view_top)
             
-            # Skip drawing if outside screen
-            if (screen_x < -self.snake_segment_radius or screen_x > self.screen_size + self.snake_segment_radius or
-                screen_y < -self.snake_segment_radius or screen_y > self.screen_size + self.snake_segment_radius):
+            # Skip drawing if outside temp_canvas
+            if (screen_x < -self.snake_segment_radius or screen_x > render_surface_dim + self.snake_segment_radius or
+                screen_y < -self.snake_segment_radius or screen_y > render_surface_dim + self.snake_segment_radius):
                 continue
             
             # Gradient color from tail to head (darker to brighter green)
             color_intensity = 150 + min(105, (i * 105) // len(self.snake_body))
             color = (0, color_intensity, 0)
             
-            # Draw circle for segment
-            pygame.draw.circle(canvas, color, (screen_x, screen_y), self.snake_segment_radius)
+            # Draw circle for segment on temp_canvas
+            pygame.draw.circle(temp_canvas, color, (screen_x, screen_y), self.snake_segment_radius)
             
             # Draw eyes on head (first segment)
             if i == len(self.snake_body) - 1:  # This is the head (reversed list)
@@ -775,118 +774,48 @@ class SnakeEnv(gym.Env):
                 right_eye_y = screen_y + math.sin(right_angle) * eye_offset
                 
                 # Draw eyes
-                pygame.draw.circle(canvas, (255, 255, 255), (int(left_eye_x), int(left_eye_y)), eye_radius)
-                pygame.draw.circle(canvas, (255, 255, 255), (int(right_eye_x), int(right_eye_y)), eye_radius)
+                pygame.draw.circle(temp_canvas, (255, 255, 255), (int(left_eye_x), int(left_eye_y)), eye_radius)
+                pygame.draw.circle(temp_canvas, (255, 255, 255), (int(right_eye_x), int(right_eye_y)), eye_radius)
                 
                 # Draw pupils
                 pupil_radius = eye_radius * 0.6
-                pygame.draw.circle(canvas, (0, 0, 0), (int(left_eye_x), int(left_eye_y)), pupil_radius)
-                pygame.draw.circle(canvas, (0, 0, 0), (int(right_eye_x), int(right_eye_y)), pupil_radius)
+                pygame.draw.circle(temp_canvas, (0, 0, 0), (int(left_eye_x), int(left_eye_y)), pupil_radius)
+                pygame.draw.circle(temp_canvas, (0, 0, 0), (int(right_eye_x), int(right_eye_y)), pupil_radius)
         
-        # Draw all food in view
+        # Draw all food in view on temp_canvas
         for food_x, food_y in self.food_positions:
-            # Convert world coordinates to screen coordinates
+            # Convert world coordinates to temp_canvas coordinates
             screen_x = int(food_x - view_left)
             screen_y = int(food_y - view_top)
             
-            # Skip if outside screen
-            if (screen_x < -self.food_radius or screen_x > self.screen_size + self.food_radius or
-                screen_y < -self.food_radius or screen_y > self.screen_size + self.food_radius):
+            # Skip if outside temp_canvas
+            if (screen_x < -self.food_radius or screen_x > render_surface_dim + self.food_radius or
+                screen_y < -self.food_radius or screen_y > render_surface_dim + self.food_radius):
                 continue
             
-            # Draw a glowing effect for food
+            # Draw a glowing effect for food on temp_canvas
             for radius in range(int(self.food_radius), 1, -2):
                 alpha = 255 - (self.food_radius - radius) * 15
                 alpha = max(0, min(255, alpha))
                 food_surface = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
                 color = (255, 0, 0, alpha)
                 pygame.draw.circle(food_surface, color, (radius, radius), radius)
-                canvas.blit(food_surface, (int(screen_x - radius), int(screen_y - radius)))
+                temp_canvas.blit(food_surface, (int(screen_x - radius), int(screen_y - radius)))
             
-            # Main food body
-            pygame.draw.circle(canvas, (255, 50, 50), (screen_x, screen_y), int(self.food_radius))
-        
-        # Draw minimap if enabled
-        if self.show_minimap:
-            minimap_rect = pygame.Rect(
-                self.screen_size - self.minimap_size - self.minimap_padding,
-                self.minimap_padding,
-                self.minimap_size,
-                self.minimap_size
-            )
-            
-            # Background for minimap
-            pygame.draw.rect(canvas, (0, 0, 0), minimap_rect)
-            pygame.draw.rect(canvas, (80, 80, 80), minimap_rect, 1)  # Border
-            
-            # Scale factors for minimap
-            scale_x = self.minimap_size / self.world_width
-            scale_y = self.minimap_size / self.world_height
-            
-            # Draw player position on minimap (green dot)
-            head_x, head_y = self.snake_body[0]
-            minimap_x = int(minimap_rect.x + head_x * scale_x)
-            minimap_y = int(minimap_rect.y + head_y * scale_y)
-            pygame.draw.circle(canvas, (0, 255, 0), (minimap_x, minimap_y), 3)
-            
-            # Draw viewport rectangle on minimap
-            viewport_rect = pygame.Rect(
-                minimap_rect.x + int(view_left * scale_x),
-                minimap_rect.y + int(view_top * scale_y),
-                int(self.screen_size * scale_x),
-                int(self.screen_size * scale_y)
-            )
-            pygame.draw.rect(canvas, (255, 255, 255), viewport_rect, 1)
-            
-            # Draw food positions on minimap (red dots)
-            for food_x, food_y in self.food_positions:
-                minimap_food_x = int(minimap_rect.x + food_x * scale_x)
-                minimap_food_y = int(minimap_rect.y + food_y * scale_y)
-                pygame.draw.circle(canvas, (255, 0, 0), (minimap_food_x, minimap_food_y), 1)
-            
-            # Draw bot positions on minimap (dots in their color)
-            for bot in self.bots:
-                if bot.body:
-                    bot_x, bot_y = bot.body[0]  # Head position
-                    minimap_bot_x = int(minimap_rect.x + bot_x * scale_x)
-                    minimap_bot_y = int(minimap_rect.y + bot_y * scale_y)
-                    pygame.draw.circle(canvas, bot.base_color, (minimap_bot_x, minimap_bot_y), 2)
-        
-        # Display score and stats
-        if pygame.font:
-            font = pygame.font.Font(None, 28)
-            text = font.render(f"Score: {self.score}", True, (255, 255, 255))
-            canvas.blit(text, (10, 10))
-            
-            # Display length
-            length_text = font.render(f"Length: {len(self.snake_body)}", True, (255, 255, 255))
-            canvas.blit(length_text, (10, 40))
-            
-            # Display number of bots
-            bots_text = font.render(f"Bots: {len(self.bots)}/{self.num_bots}", True, (255, 255, 255))
-            canvas.blit(bots_text, (10, 70))
-            
-            # Display world position
-            head_x, head_y = self.snake_body[0]
-            pos_text = font.render(f"Pos: ({int(head_x)}, {int(head_y)})", True, (200, 200, 200))
-            canvas.blit(pos_text, (10, 100))
-            
-        if self.render_mode == "human":
-            # Copy canvas to window
-            self.window.blit(canvas, canvas.get_rect())
-            pygame.event.pump()
-            pygame.display.update()
-            
-            # Ensure consistent frame rate
-            self.clock.tick(self.metadata["render_fps"])
-            
+            # Main food body on temp_canvas
+            pygame.draw.circle(temp_canvas, (255, 50, 50), (screen_x, screen_y), int(self.food_radius))
+
+        # Scale the temp_canvas down to the final observation size (self.screen_size x self.screen_size, e.g., 84x84)
+        final_observation_canvas = pygame.transform.scale(temp_canvas, (self.screen_size, self.screen_size))
+
         return np.transpose(
-            np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2)
+            np.array(pygame.surfarray.pixels3d(final_observation_canvas)), axes=(1, 0, 2) # Transpose for (height, width, channel)
         )
-    
+
     def close(self):
-        if self.window is not None:
-            pygame.display.quit()
-            pygame.quit()
-            self.window = None
-            self.clock = None
+        # if self.window is not None: # Human mode window removed
+            # pygame.display.quit()
+            # pygame.quit() # Pygame is quit globally now
+            # self.window = None
+            # self.clock = None
+        pygame.quit() # Quit Pygame when env is closed

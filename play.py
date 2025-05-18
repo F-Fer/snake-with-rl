@@ -3,111 +3,100 @@ import pygame
 import snake_env
 import time
 import math
+import numpy as np
 
 def play_snake():
-    # Create environment with multiple bot snakes and multiple food items
-    # Using a larger world size (3000x3000 pixels)
-    env = gym.make('Snake-v0', render_mode='human', num_bots=0, num_foods=20, world_size=3000)
-    
-    # Get the window dimensions from PyGame once it's been initialized
-    observation, info = env.reset()
-    
-    # Modify the render FPS for smoother gameplay
-    env.metadata['render_fps'] = 60  # Higher FPS for smoother mouse control
-    
-    # Initialize pygame for capturing mouse events
+    # Create environment. render_mode is now fixed in the env.
+    # screen_size for observation is 84x84. world_size can still be large.
+    env = gym.make('Snake-v0', num_bots=3, num_foods=20, world_size=3000, screen_size=256, zoom_level=1.0)
+
     pygame.init()
-    
-    # Get the actual window dimensions after the window is created
-    # Using pygame.display.get_surface().get_size() to get actual screen dimensions
-    pygame.event.pump()  # Process events to make sure the window is created
-    screen_width, screen_height = pygame.display.get_surface().get_size()
-    
-    # Center of screen to calculate screen coordinate of head
-    screen_center_x = screen_width // 2
-    screen_center_y = screen_height // 2
-    
+    display_width = 600  # Width of the window to show the game
+    display_height = 600 # Height of the window to show the game
+    screen = pygame.display.set_mode((display_width, display_height))
+    pygame.display.set_caption("Snake RL Environment Viewer")
+    clock = pygame.time.Clock()
+    # --- End Pygame setup ---
+
+    observation, info = env.reset() # Observation is now an 84x84x3 image
+
     # Game loop
     running = True
-    last_action = 12  # Start with no turn (action 12 = 0 degrees relative to current heading)
     
-    print("Welcome to Snake.io! Use your mouse to control direction.")
-    print("Move mouse to change direction (limited to 60° turn per frame).")
-    print("Unlike classic Snake, you can run over yourself like in snake.io!")
-    print("Avoid hitting other snakes and the walls.")
+    # For controlling the snake with keyboard (continuous actions)
+    # Target angle for the snake, controlled by arrow keys
+    target_direction_angle = 0.0 # Initial angle (right)
+    angle_increment = math.pi / 18 # Increment for turning (10 degrees)
+
+    print("Welcome to Snake.io RL Viewer!")
+    print("Use LEFT/RIGHT arrow keys to change snake direction.")
     print("Press Q or ESC to quit.")
-    
+
     # Add a slight delay before starting game
     time.sleep(1)
-    
-    # Add a variable to control manual step timing
+
     last_step_time = time.time()
-    step_delay = 0.01  # 10ms between steps (for smooth movement)
-    
-    # Hide the mouse cursor
-    pygame.mouse.set_visible(False)
-    
+    step_delay = 0.05 # Control game speed for playability
+
     while running:
         current_time = time.time()
-        
-        # Process pygame events
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_q or event.key == pygame.K_ESCAPE:
                     running = False
+                if event.key == pygame.K_LEFT:
+                    target_direction_angle -= angle_increment
+                if event.key == pygame.K_RIGHT:
+                    target_direction_angle += angle_increment
         
-        # Get mouse position
-        mouse_pos = pygame.mouse.get_pos()
-        
-        # Get head world position from info
-        head_world_x, head_world_y = info['head_position']
-        
-        # Calculate target angle from mouse position relative to screen center (where head is)
-        dx = mouse_pos[0] - screen_center_x
-        dy = mouse_pos[1] - screen_center_y
-        target_angle = math.atan2(dy, dx)  # angle in radians
-        
-        # Normalize both angles to [0, 2π)
-        current_angle = info['direction_angle'] % (2 * math.pi)
-        target_angle = target_angle % (2 * math.pi)
-        
-        # Calculate the shortest angle difference
-        angle_diff = target_angle - current_angle
-        if angle_diff > math.pi:
-            angle_diff -= 2 * math.pi
-        elif angle_diff < -math.pi:
-            angle_diff += 2 * math.pi
-            
-        # Convert angle difference to action (relative turn)
-        # 0 = -180°, 12 = 0° (no turn), 23 = +165°
-        relative_action = int(round(angle_diff / (math.pi / 12))) + 12
-        relative_action = max(0, min(23, relative_action))  # Clamp to valid range
-        
-        # Only take a step if enough time has passed
+        target_direction_angle %= (2 * math.pi) # Normalize angle
+
+        # Convert target_direction_angle to [cos, sin] action
+        action = np.array([math.cos(target_direction_angle), math.sin(target_direction_angle)], dtype=np.float32)
+
         if current_time - last_step_time >= step_delay:
-            # Step environment
-            observation, reward, terminated, truncated, info = env.step(relative_action)
+            observation, reward, terminated, truncated, info = env.step(action)
             last_step_time = current_time
-            last_action = relative_action
-            
+
             # Display score and stats in console
-            heading_degrees = int(info['direction_angle'] * 180 / math.pi) % 360
-            relative_degrees = (relative_action - 12) * 15
-            print(f"\rScore: {info['score']} | Length: {info['snake_length']} | " +
-                  f"Bots: {info['num_bots']} | Turn: {relative_degrees}° | Heading: {heading_degrees}°", 
-                  end="")
+            current_snake_angle_rad = info['direction_angle']
+            heading_degrees = int(current_snake_angle_rad * 180 / math.pi) % 360
             
-            # Check if game is over
+            # Calculate target degrees for display
+            target_degrees = int(target_direction_angle * 180 / math.pi) % 360
+
+            print(f"\rScore: {info['score']} | Length: {info['snake_length']} | " +
+                  f"Bots: {info['num_bots']} | Reward: {reward:.2f} | " +
+                  f"Target Dir: {target_degrees}° | Actual Heading: {heading_degrees}°",
+                  end="")
+
             if terminated or truncated:
                 print(f"\nGame Over! Final Score: {info['score']}")
-                time.sleep(2)  # Pause briefly to see final state
+                time.sleep(2)
                 observation, info = env.reset()
-                last_action = 12  # Reset to no turn
+                target_direction_angle = 0.0 # Reset target angle
+
+        # --- Display the 84x84 observation from the environment ---
+        if observation is not None:
+            # Pygame expects (width, height, channel) or (width, height)
+            # The observation is (height, width, channel) from env.render()
+            # So it's already in a good format for pygame.surfarray.make_surface
+            # but pygame.transform.scale expects a surface.
+            
+            # Create a Pygame surface from the observation
+            obs_surface = pygame.surfarray.make_surface(observation) # observation is HxWxC
+            
+            # Scale the 84x84 surface to fit the display window
+            scaled_surface = pygame.transform.scale(obs_surface, (display_width, display_height))
+            
+            screen.blit(scaled_surface, (0, 0))
         
-    # Clean up
-    pygame.mouse.set_visible(True)
+        pygame.display.flip()
+        clock.tick(30) # Limit FPS for the display window
+
     env.close()
     pygame.quit()
 
