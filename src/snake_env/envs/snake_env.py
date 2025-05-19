@@ -792,7 +792,7 @@ class SnakeEnv(gym.Env):
         final_observation_canvas = pygame.transform.scale(temp_canvas, (self.screen_size, self.screen_size))
 
         return np.transpose(
-            np.array(pygame.surfarray.pixels3d(final_observation_canvas)), axes=(1, 0, 2) # Transpose for (height, width, channel)
+            np.array(pygame.surfarray.pixels3d(final_observation_canvas), dtype=np.uint8), axes=(1, 0, 2) # Transpose for (height, width, channel)
         )
 
     def close(self):
