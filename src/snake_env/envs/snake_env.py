@@ -387,6 +387,9 @@ class SnakeEnv(gym.Env):
         cos_val = action[0]
         sin_val = action[1]
 
+        print(f"action: {action}")
+        print(f"action shape: {action.shape}")
+
         # Directly use atan2 to get the target angle
         target_angle = math.atan2(sin_val, cos_val)
 
