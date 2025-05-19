@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "snake-env"
 version = "0.1.0"
@@ -8,4 +12,9 @@ dependencies = [
     "gymnasium>=0.28.1",
     "numpy>=1.21.0",
     "pygame>=2.1.0",
+    "tensordict>=0.8.3",
+    "torchrl>=0.8.1",
 ]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
