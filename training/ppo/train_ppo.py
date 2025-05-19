@@ -48,9 +48,6 @@ print(f"Using device: {device}")
 snake_env = SnakeEnv()
 env = GymWrapper(snake_env) # This will place observations under the key "observation"
 
-print(f"Observation spec before transform: {env.observation_spec}")
-print(f"Action spec before transform: {env.action_spec}")
-
 env = TransformedEnv(env, Compose(
     # ToTensorImage expects "observation" as default in_key if env.observation_spec is standard
     # It will output a tensor under the same key "observation"
@@ -60,9 +57,6 @@ env = TransformedEnv(env, Compose(
 # Test the env and get initial data spec
 initial_data = env.reset() 
 transformed_obs_shape = initial_data["pixels"].shape # Should be (C, H, W), e.g., (3, 84, 84)
-
-print(f"Observation shape after transform: {transformed_obs_shape}")
-print(f"Action spec after transform: {env.action_spec.shape}")
 
 actor_net_core = ModelActor(transformed_obs_shape, env.action_spec.shape[0]).to(device)
 critic_net = ModelCritic(transformed_obs_shape).to(device)
