@@ -12,7 +12,7 @@ class ModelActor(nn.Module):
         super(ModelActor, self).__init__()
 
         self.net = nn.Sequential(
-            nn.Conv2d(obs_shape[0], 32, kernel_size=8, stride=4),
+            nn.Conv2d(obs_shape[1], 32, kernel_size=8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
             nn.ReLU(),
@@ -33,7 +33,7 @@ class ModelCritic(nn.Module):
         super(ModelCritic, self).__init__()
 
         self.net = nn.Sequential(
-            nn.Conv2d(obs_shape[0], 32, kernel_size=8, stride=4),
+            nn.Conv2d(obs_shape[1], 32, kernel_size=8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
             nn.ReLU(),
