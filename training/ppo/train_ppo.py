@@ -72,7 +72,7 @@ def main():
     with torch.no_grad():
         # Use the full tensor with batch dimension for proper initialization
         test_input = initial_data["pixels"]  # Keep the batch dimension [1, 3, 84, 84]
-        
+        print(f"Test input shape: {test_input.shape}")
         # Initialize the lazy layers properly
         actor_output = actor_net_core(test_input.to(device))
         critic_output = critic_net(test_input.to(device))
@@ -86,28 +86,27 @@ def main():
     # This module will process "pixels" and output "loc" and "scale"
     policy_params_module = TensorDictModule(
         module=actor_network_with_extractor,
-        in_keys=["pixels"], # Takes "pixels" from environment
-        out_keys=["loc", "scale"] # Outputs distribution parameters
+        in_keys=["pixels"], 
+        out_keys=["loc", "scale"]
     )
 
     # ProbabilisticActor samples an action from "loc" and "scale" and outputs "action"
     policy_module = ProbabilisticActor(
         module=policy_params_module,
         spec=env.action_spec,
-        in_keys=["loc", "scale"], # Inputs for TanhNormal
-        out_keys=["action"], # This "action" key will be used by the collector and environment
+        in_keys=["loc", "scale"],
+        out_keys=["action"],
         distribution_class=TanhNormal,
         distribution_kwargs={
-            "low": env.action_spec.space.low, # TanhNormal expects "min"
-            "high": env.action_spec.space.high, # TanhNormal expects "max"
+            "low": env.action_spec.space.low,
+            "high": env.action_spec.space.high,
         },
-        return_log_prob=True, # Important for PPO
+        return_log_prob=True,
     ).to(device)
-
 
     value_module = TensorDictModule(
         critic_net,
-        in_keys=["pixels"], # Takes "observation"
+        in_keys=["pixels"],
         out_keys=["state_value"],
     )
 
@@ -143,15 +142,11 @@ def main():
 
     optimizer = optim.Adam(ppo_loss.parameters(), lr=LEARNING_RATE_ACTOR)
 
-
     logs = defaultdict(list)
     eval_str = ""
     pbar = tqdm(total=collector.total_frames) # Use collector's actual total frames
 
     for i, tensordict_data in enumerate(collector):
-        # tensordict_data has shape [1, TRAJECTORY_SIZE]
-        # "pixels" has shape [1, TRAJECTORY_SIZE, C, H, W]
-        
         # Since we only have 1 environment, squeeze the environment dimension
         # This changes shape from [1, TRAJECTORY_SIZE, ...] to [TRAJECTORY_SIZE, ...]
         tensordict_data_squeezed = tensordict_data.squeeze(0)
@@ -161,18 +156,15 @@ def main():
             advantage_module(tensordict_data_squeezed)
             # tensordict_data_squeezed now contains "advantage" and "value_target"
 
-        # Prepare data for PPO update epochs
-        # Reshape/view data to remove the env dimension if it's 1, making it [TRAJECTORY_SIZE, ...]
-        # This makes it easier to sample minibatches.
-        current_trajectory_view = tensordict_data_squeezed.view(-1) # Or tensordict_data_squeezed[0] if always num_envs=1
         
         # PPO update loop: multiple epochs over the collected trajectory
         for _epoch_idx in range(PPO_EPOCHS):
             replay_buffer.empty() # Clear buffer before filling with new trajectory data for this epoch set
-            replay_buffer.extend(current_trajectory_view.cpu()) # Add all data from the current trajectory
+            replay_buffer.extend(tensordict_data_squeezed.cpu()) # Add all data from the current trajectory
 
             for _batch_idx in range(TRAJECTORY_SIZE // PPO_BATCH_SIZE):
                 subdata = replay_buffer.sample(PPO_BATCH_SIZE)
+                
                 loss_vals = ppo_loss(subdata.to(device))
                 loss_value = (
                     loss_vals["loss_objective"]
@@ -189,21 +181,14 @@ def main():
                 del subdata, loss_vals, loss_value
         
         # Clean up trajectory data after all epochs
-        del current_trajectory_view
+        del tensordict_data_squeezed
         torch.cuda.empty_cache()
 
         logs["reward"].append(tensordict_data_squeezed["next", "reward"].mean().item())
         pbar.update(tensordict_data_squeezed.numel())
-        cum_reward_str = (
-            f"average reward={logs['reward'][-1]: 4.4f} (init={logs['reward'][0]: 4.4f})"
-        )
-        
-        # step_count might not be available in all environments
         logs["step_count"].append(2049)  # Use trajectory length as step count
-            
-        stepcount_str = f"step count (max): {logs['step_count'][-1]}"
         logs["lr"].append(optimizer.param_groups[0]["lr"])
-        lr_str = f"lr policy: {logs['lr'][-1]: 4.4f}"
+        
         if i % 10 == 0:
             # Clear CUDA cache before evaluation
             torch.cuda.empty_cache()
