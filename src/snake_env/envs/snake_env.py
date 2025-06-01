@@ -457,7 +457,7 @@ class SnakeEnv(gym.Env):
         
         if wall_collision:
             self.game_over = True
-            reward -= self.C3 
+            reward -= self.C3
             terminated = True
         
         # Check for collisions with bot snakes
@@ -518,7 +518,6 @@ class SnakeEnv(gym.Env):
             terminated = True
         else:
             terminated = False
-            reward = 0
             
         # Calculate length change reward (C1)
         length_change = current_length - self.previous_length

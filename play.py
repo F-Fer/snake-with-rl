@@ -1,6 +1,6 @@
 import gymnasium as gym
 import pygame
-import snake_env
+from src.snake_env.envs.snake_env import SnakeEnv
 import time
 import math
 import numpy as np
@@ -31,6 +31,7 @@ def play_snake():
 
 
     frame_count = 0
+    reward_sum = 0
     while running:
 
         for event in pygame.event.get():
@@ -55,6 +56,8 @@ def play_snake():
 
         observation, reward, terminated, truncated, info = env.step(action)
 
+        reward_sum += reward
+
         # Display score and stats in console
         current_snake_angle_rad = info['direction_angle']
         heading_degrees = int(current_snake_angle_rad * 180 / math.pi) % 360
@@ -68,12 +71,12 @@ def play_snake():
                 end="")
 
         if terminated or truncated:
-            print(f"\nGame Over! Final Score: {info['score']}")
+            print(f"\nGame Over! Final Score: {info['score']} | Total Reward: {reward_sum}")
             print(f"Frame count: {frame_count}")
             print(f"Terminated: {terminated}, truncated: {truncated}")
             time.sleep(2)
             observation, info = env.reset()
-            
+            reward_sum = 0
 
         # Display the observation from the environment
         if observation is not None:
