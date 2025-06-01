@@ -4,6 +4,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 # Set CUDA memory configuration to help with fragmentation
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+# Add CUDA debugging
+os.environ['TORCH_USE_CUDA_DSA'] = '1'  # Enable device-side assertions
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 from tqdm import tqdm
 import torch
@@ -13,7 +16,7 @@ from training.lib.model import ModelActor, ModelCritic
 import multiprocessing
 from snake_env.envs.snake_env import SnakeEnv
 from torchrl.envs.libs.gym import GymWrapper
-from torchrl.envs.transforms import ToTensorImage, TransformedEnv, Resize, GrayScale, FrameSkipTransform
+from torchrl.envs.transforms import ToTensorImage, TransformedEnv, Resize, FrameSkipTransform, GrayScale
 from tensordict.nn import TensorDictModule
 from tensordict.nn.distributions import NormalParamExtractor
 import torch.optim as optim
@@ -37,8 +40,8 @@ GAMMA = 0.99
 GAE_LAMBDA = 0.95
 
 TRAJECTORY_SIZE = 16_384
-LEARNING_RATE_ACTOR = 1e-5
-LEARNING_RATE_CRITIC = 1e-4
+LEARNING_RATE_ACTOR = 3e-4
+LEARNING_RATE_CRITIC = 1e-3
 
 PPO_EPS = 0.2
 PPO_EPOCHS = 10
@@ -56,7 +59,8 @@ print(f"Using device: {device}")
 
 
 def main():
-    env = ParallelEnv(NUM_ENVS, lambda: GymWrapper(SnakeEnv(num_bots=20, num_foods=50)))
+    # Start with simpler environment for initial learning
+    env = ParallelEnv(NUM_ENVS, lambda: GymWrapper(SnakeEnv(num_bots=5, num_foods=20)))  # Reduced from 20 bots, 50 foods
 
     # Define the transforms to apply to the environment
     frameskip_transform = FrameSkipTransform(4)
@@ -148,7 +152,12 @@ def main():
         loss_critic_type="smooth_l1",
     )
 
-    optimizer = optim.Adam(ppo_loss.parameters(), lr=LEARNING_RATE_ACTOR)
+    # Use separate optimizers for better control
+    optimizer_actor = optim.Adam(policy_module.parameters(), lr=LEARNING_RATE_ACTOR)
+    optimizer_critic = optim.Adam(value_module.parameters(), lr=LEARNING_RATE_CRITIC)
+    
+    # For gradient clipping
+    GRAD_CLIP_VALUE = 1.0
 
     # Initialize TensorBoard logger
     run_name = f"snake_ppo_training_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -175,10 +184,16 @@ def main():
 
         
         # PPO update loop: multiple epochs over the collected trajectory
+        epoch_losses_actor = []
+        epoch_losses_critic = []
+        epoch_losses_entropy = []
         for _epoch_idx in range(PPO_EPOCHS):
             replay_buffer.empty() # Clear buffer before filling with new trajectory data for this epoch set
             replay_buffer.extend(tensordict_data_squeezed.cpu()) # Add all data from the current trajectory
 
+            batch_losses_actor = []
+            batch_losses_critic = []
+            batch_losses_entropy = []
             for _batch_idx in range(total_samples // PPO_BATCH_SIZE):
                 subdata = replay_buffer.sample(PPO_BATCH_SIZE)
                 
@@ -188,11 +203,17 @@ def main():
                     + loss_vals["loss_critic"]
                     + loss_vals["loss_entropy"]
                 )
+                
+                batch_losses_actor.append(loss_vals["loss_objective"].item())
+                batch_losses_critic.append(loss_vals["loss_critic"].item())
+                batch_losses_entropy.append(loss_vals["loss_entropy"].item())
 
                 loss_value.backward()
-                torch.nn.utils.clip_grad_norm_(ppo_loss.parameters(), 1.0)
-                optimizer.step()
-                optimizer.zero_grad()
+                torch.nn.utils.clip_grad_norm_(ppo_loss.parameters(), GRAD_CLIP_VALUE)
+                optimizer_actor.step()
+                optimizer_critic.step()
+                optimizer_actor.zero_grad()
+                optimizer_critic.zero_grad()
                 
                 # Clean up batch data immediately
                 del subdata, loss_vals, loss_value
@@ -201,12 +222,26 @@ def main():
                 if _batch_idx % 5 == 0:
                     torch.cuda.empty_cache()
             
+            epoch_losses_actor.extend(batch_losses_actor)
+            epoch_losses_critic.extend(batch_losses_critic)
+            epoch_losses_entropy.extend(batch_losses_entropy)
             # Clear GPU cache after each epoch
             torch.cuda.empty_cache()
 
         # Log metrics to TensorBoard
         logger.log_scalar("train/reward_mean", tensordict_data_squeezed["next", "reward"].mean().item(), step=i)
         logger.log_scalar("train/reward_sum", tensordict_data_squeezed["next", "reward"].sum().item(), step=i)
+        
+        # Log training loss
+        if epoch_losses_actor:
+            logger.log_scalar("train/loss_mean_actor", np.mean(epoch_losses_actor), step=i)
+            logger.log_scalar("train/loss_std_actor", np.std(epoch_losses_actor), step=i)
+        if epoch_losses_critic:
+            logger.log_scalar("train/loss_mean_critic", np.mean(epoch_losses_critic), step=i)
+            logger.log_scalar("train/loss_std_critic", np.std(epoch_losses_critic), step=i)
+        if epoch_losses_entropy:
+            logger.log_scalar("train/loss_mean_entropy", np.mean(epoch_losses_entropy), step=i)
+            logger.log_scalar("train/loss_std_entropy", np.std(epoch_losses_entropy), step=i)
 
         # Clean up trajectory data after all epochs
         del tensordict_data_squeezed, tensordict_data
@@ -221,7 +256,7 @@ def main():
             with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
                 # execute a rollout with the trained policy
                 try:
-                    eval_rollout = env.rollout(1000, policy_module)
+                    eval_rollout = env.rollout(100, policy_module)
 
                     # Move to CPU immediately to avoid CUDA memory issues
                     eval_reward_mean = eval_rollout["next", "reward"].cpu().mean().item()
@@ -264,7 +299,7 @@ def main():
                             imageio.mimwrite(video_path, pixel_frames, fps=30, quality=8)
                             
                         except Exception as video_error:
-                            print(f"Failed to save video: {video_error}") # TODO: Handle this better
+                            print(f"Failed to save video: {video_error}")
                     
                     # Clean up evaluation rollout immediately
                     del eval_rollout

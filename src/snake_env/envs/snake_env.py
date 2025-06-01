@@ -203,10 +203,11 @@ class BotSnake:
 class SnakeEnv(gym.Env):
     metadata = {'render_modes': ['rgb_array']}
 
-    # Reward constants
-    C1 = 1  # For change in length
-    C2 = 10   # For eliminating an opponent
-    C3 = 10  # For death
+    # Reward constants - rebalanced for better learning
+    C1 = 5    # For change in length (increased from 1)
+    C2 = 20   # For eliminating an opponent (increased from 10) 
+    C3 = 5    # For death (reduced from 10)
+    SURVIVAL_REWARD = 0.01  # Small reward for staying alive
     
     def __init__(self, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10, screen_size=256, zoom_level=1.0):
         self.screen_size = screen_size  
@@ -523,6 +524,10 @@ class SnakeEnv(gym.Env):
         length_change = current_length - self.previous_length
         reward += self.C1 * length_change
         self.previous_length = current_length
+        
+        # Add small survival reward to encourage staying alive
+        if not terminated:
+            reward += self.SURVIVAL_REWARD
             
         # Check for food collection by player
         head_x, head_y = self.snake_body[0]
