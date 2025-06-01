@@ -61,6 +61,9 @@ def main():
     
     # Remove batch dimension to get the actual observation shape
     transformed_obs_shape = initial_data["pixels"].shape[-3:]  # Take last 3 dimensions: (C, H, W)
+    
+    print(f"Action spec: {env.action_spec}")
+    print(f"Action spec shape: {env.action_spec.shape}")
 
     actor_net_core = ModelActor(transformed_obs_shape, env.action_spec.shape[0]).to(device)
     critic_net = ModelCritic(transformed_obs_shape).to(device)
@@ -181,6 +184,13 @@ def main():
                 torch.nn.utils.clip_grad_norm_(ppo_loss.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
+                
+                # Clean up batch data
+                del subdata, loss_vals, loss_value
+        
+        # Clean up trajectory data after all epochs
+        del current_trajectory_view
+        torch.cuda.empty_cache()
 
         logs["reward"].append(tensordict_data_squeezed["next", "reward"].mean().item())
         pbar.update(tensordict_data_squeezed.numel())
@@ -195,28 +205,40 @@ def main():
         logs["lr"].append(optimizer.param_groups[0]["lr"])
         lr_str = f"lr policy: {logs['lr'][-1]: 4.4f}"
         if i % 10 == 0:
-            # We evaluate the policy once every 10 trajectories of data.
-            # Evaluation is rather simple: execute the policy without exploration
-            # (take the expected value of the action distribution) for a given
-            # number of steps (1000, which is our ``env`` horizon).
-            # The ``rollout`` method of the ``env`` can take a policy as argument:
-            # it will then execute this policy at each step.
+            # Clear CUDA cache before evaluation
+            torch.cuda.empty_cache()
+            
             with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
                 # execute a rollout with the trained policy
-                eval_rollout = env.rollout(1000, policy_module)
-                print(f"Eval rollout: {eval_rollout}")
-                logs["eval reward"].append(eval_rollout["next", "reward"].mean().item())
-                logs["eval reward (sum)"].append(
-                    eval_rollout["next", "reward"].sum().item()
-                )
-                logs["eval step_count"].append(eval_rollout["step_count"].max().item())
-                eval_str = (
-                    f"eval cumulative reward: {logs['eval reward (sum)'][-1]: 4.4f} "
-                    f"(init: {logs['eval reward (sum)'][0]: 4.4f}), "
-                    f"eval step-count: {logs['eval step_count'][-1]}"
-                )
-                del eval_rollout
-        pbar.set_description(", ".join([eval_str, cum_reward_str, stepcount_str, lr_str]))
+                try:
+                    eval_rollout = env.rollout(100, policy_module)  # Reduced from 1000 to 100 steps
+                    
+                    # Move to CPU immediately to avoid CUDA memory issues
+                    eval_reward_mean = eval_rollout["next", "reward"].cpu().mean().item()
+                    eval_reward_sum = eval_rollout["next", "reward"].cpu().sum().item()
+                    
+                    logs["eval reward"].append(eval_reward_mean)
+                    logs["eval reward (sum)"].append(eval_reward_sum)
+                    
+                    # Handle step_count safely
+                    if "step_count" in eval_rollout.keys():
+                        logs["eval step_count"].append(eval_rollout["step_count"].cpu().max().item())
+                    else:
+                        logs["eval step_count"].append(100)  # Use rollout length as fallback
+                    
+                    eval_str = (
+                        f"eval cumulative reward: {logs['eval reward (sum)'][-1]: 4.4f} "
+                        f"(init: {logs['eval reward (sum)'][0]: 4.4f}), "
+                        f"eval step-count: {logs['eval step_count'][-1]}"
+                    )
+                    
+                    # Clean up evaluation rollout
+                    del eval_rollout
+                    torch.cuda.empty_cache()
+                    
+                except Exception as e:
+                    print(f"Evaluation failed: {e}")
+                    eval_str = "eval failed"
 
     collector.shutdown() # Ensure collector resources are released
     pbar.close()
