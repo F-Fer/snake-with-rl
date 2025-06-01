@@ -204,9 +204,9 @@ class SnakeEnv(gym.Env):
     metadata = {'render_modes': ['rgb_array']}
 
     # Reward constants
-    C1 = 0.1  # For change in length
+    C1 = 1  # For change in length
     C2 = 10   # For eliminating an opponent
-    C3 = 100  # For death
+    C3 = 10  # For death
     
     def __init__(self, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10, screen_size=256, zoom_level=1.0):
         self.screen_size = screen_size  

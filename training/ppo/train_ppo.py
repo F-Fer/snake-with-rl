@@ -34,7 +34,7 @@ GAMMA = 0.99
 GAE_LAMBDA = 0.95
 
 TRAJECTORY_SIZE = 2049
-LEARNING_RATE_ACTOR = 1e-5
+LEARNING_RATE_ACTOR = 1e-3
 LEARNING_RATE_CRITIC = 1e-4
 
 PPO_EPS = 0.2
@@ -52,7 +52,7 @@ print(f"Using device: {device}")
 
 
 def main():
-    env = ParallelEnv(1, lambda: GymWrapper(SnakeEnv()))
+    env = ParallelEnv(1, lambda: GymWrapper(SnakeEnv(num_bots=20, num_foods=50)))
 
     # Define the transforms to apply to the environment
     resize_transform = Resize(84)
@@ -200,7 +200,9 @@ def main():
         torch.cuda.empty_cache()
 
         # Log metrics to TensorBoard
-        logger.log_scalar("train/reward", tensordict_data_squeezed["next", "reward"].mean().item(), step=i)
+        logger.log_scalar("train/reward_mean", tensordict_data_squeezed["next", "reward"].mean().item(), step=i)
+        logger.log_scalar("train/reward_sum", tensordict_data_squeezed["next", "reward"].sum().item(), step=i)
+
         pbar.update(tensordict_data_squeezed.numel())
         
         if i % 10 == 0:
@@ -210,8 +212,7 @@ def main():
             with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
                 # execute a rollout with the trained policy
                 try:
-                    eval_rollout = env.rollout(1000, policy_module)  # 500 steps for video
-                    print(f"Eval rollout: {eval_rollout['pixels'].shape}")
+                    eval_rollout = env.rollout(1000, policy_module)
 
                     # Move to CPU immediately to avoid CUDA memory issues
                     eval_reward_mean = eval_rollout["next", "reward"].cpu().mean().item()
