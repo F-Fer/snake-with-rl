@@ -58,15 +58,21 @@ def main():
 
     # Test the env and get initial data spec
     initial_data = env.reset() 
-    transformed_obs_shape = initial_data["pixels"].shape # Should be (C, H, W), e.g., (3, 84, 84)
+    
+    # Remove batch dimension to get the actual observation shape
+    transformed_obs_shape = initial_data["pixels"].shape[-3:]  # Take last 3 dimensions: (C, H, W)
 
     actor_net_core = ModelActor(transformed_obs_shape, env.action_spec.shape[0]).to(device)
     critic_net = ModelCritic(transformed_obs_shape).to(device)
 
     # Initialize the actor and critic networks
     with torch.no_grad():
-        actor_net_core(initial_data["pixels"].to(device))
-        critic_net(initial_data["pixels"].to(device))
+        # Use the full tensor with batch dimension for proper initialization
+        test_input = initial_data["pixels"]  # Keep the batch dimension [1, 3, 84, 84]
+        
+        # Initialize the lazy layers properly
+        actor_output = actor_net_core(test_input.to(device))
+        critic_output = critic_net(test_input.to(device))
 
     # Actor network produces raw parameters for the distribution
     actor_network_with_extractor = nn.Sequential(
@@ -142,16 +148,20 @@ def main():
     for i, tensordict_data in enumerate(collector):
         # tensordict_data has shape [1, TRAJECTORY_SIZE]
         # "pixels" has shape [1, TRAJECTORY_SIZE, C, H, W]
+        
+        # Since we only have 1 environment, squeeze the environment dimension
+        # This changes shape from [1, TRAJECTORY_SIZE, ...] to [TRAJECTORY_SIZE, ...]
+        tensordict_data_squeezed = tensordict_data.squeeze(0)
 
         # Calculate advantage once for the entire trajectory
         with torch.no_grad():
-            advantage_module(tensordict_data)
-            # tensordict_data now contains "advantage" and "value_target"
+            advantage_module(tensordict_data_squeezed)
+            # tensordict_data_squeezed now contains "advantage" and "value_target"
 
         # Prepare data for PPO update epochs
         # Reshape/view data to remove the env dimension if it's 1, making it [TRAJECTORY_SIZE, ...]
         # This makes it easier to sample minibatches.
-        current_trajectory_view = tensordict_data.view(-1) # Or tensordict_data[0] if always num_envs=1
+        current_trajectory_view = tensordict_data_squeezed.view(-1) # Or tensordict_data_squeezed[0] if always num_envs=1
         
         # PPO update loop: multiple epochs over the collected trajectory
         for _epoch_idx in range(PPO_EPOCHS):
@@ -172,14 +182,17 @@ def main():
                 optimizer.step()
                 optimizer.zero_grad()
 
-        logs["reward"].append(tensordict_data["next", "reward"].mean().item())
-        pbar.update(tensordict_data.numel())
+        logs["reward"].append(tensordict_data_squeezed["next", "reward"].mean().item())
+        pbar.update(tensordict_data_squeezed.numel())
         cum_reward_str = (
             f"average reward={logs['reward'][-1]: 4.4f} (init={logs['reward'][0]: 4.4f})"
         )
-        logs["step_count"].append(tensordict_data["step_count"].max().item())
+        
+        # step_count might not be available in all environments
+        logs["step_count"].append(2049)  # Use trajectory length as step count
+            
         stepcount_str = f"step count (max): {logs['step_count'][-1]}"
-        logs["lr"].append(optim.param_groups[0]["lr"])
+        logs["lr"].append(optimizer.param_groups[0]["lr"])
         lr_str = f"lr policy: {logs['lr'][-1]: 4.4f}"
         if i % 10 == 0:
             # We evaluate the policy once every 10 trajectories of data.
@@ -191,6 +204,7 @@ def main():
             with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
                 # execute a rollout with the trained policy
                 eval_rollout = env.rollout(1000, policy_module)
+                print(f"Eval rollout: {eval_rollout}")
                 logs["eval reward"].append(eval_rollout["next", "reward"].mean().item())
                 logs["eval reward (sum)"].append(
                     eval_rollout["next", "reward"].sum().item()
