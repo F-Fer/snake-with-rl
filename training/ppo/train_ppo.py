@@ -33,13 +33,14 @@ import numpy as np
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 
-TRAJECTORY_SIZE = 2049
-LEARNING_RATE_ACTOR = 1e-3
+TRAJECTORY_SIZE = 16_384
+LEARNING_RATE_ACTOR = 1e-5
 LEARNING_RATE_CRITIC = 1e-4
 
 PPO_EPS = 0.2
 PPO_EPOCHS = 10
 PPO_BATCH_SIZE = 64
+NUM_ENVS = 16
 
 is_fork = multiprocessing.get_start_method() == "fork"
 device = (
@@ -52,7 +53,7 @@ print(f"Using device: {device}")
 
 
 def main():
-    env = ParallelEnv(1, lambda: GymWrapper(SnakeEnv(num_bots=20, num_foods=50)))
+    env = ParallelEnv(NUM_ENVS, lambda: GymWrapper(SnakeEnv(num_bots=20, num_foods=50)))
 
     # Define the transforms to apply to the environment
     resize_transform = Resize(84)
@@ -66,21 +67,17 @@ def main():
 
     # Test the env and get initial data spec
     initial_data = env.reset() 
-    
+    print(f"Initial pixels shape: {initial_data['pixels'].shape}")
     # Remove batch dimension to get the actual observation shape
     transformed_obs_shape = initial_data["pixels"].shape[-3:]  # Take last 3 dimensions: (C, H, W)
-    
-    print(f"Action spec: {env.action_spec}")
-    print(f"Action spec shape: {env.action_spec.shape}")
 
-    actor_net_core = ModelActor(transformed_obs_shape, env.action_spec.shape[0]).to(device)
+    actor_net_core = ModelActor(transformed_obs_shape, env.action_spec.shape[-1]).to(device)
     critic_net = ModelCritic(transformed_obs_shape).to(device)
 
     # Initialize the actor and critic networks
     with torch.no_grad():
         # Use the full tensor with batch dimension for proper initialization
         test_input = initial_data["pixels"]  # Keep the batch dimension [1, 3, 84, 84]
-        print(f"Test input shape: {test_input.shape}")
         # Initialize the lazy layers properly
         actor_output = actor_net_core(test_input.to(device))
         critic_output = critic_net(test_input.to(device))
@@ -162,9 +159,14 @@ def main():
     pbar = tqdm(total=collector.total_frames) # Use collector's actual total frames
 
     for i, tensordict_data in enumerate(collector):
-        # Since we only have 1 environment, squeeze the environment dimension
-        # This changes shape from [1, TRAJECTORY_SIZE, ...] to [TRAJECTORY_SIZE, ...]
-        tensordict_data_squeezed = tensordict_data.squeeze(0)
+        # Reshape the data to flatten environment and trajectory dimensions
+        # From [num_envs, trajectory_length_per_env, ...] to [total_samples, ...]
+        batch_size = tensordict_data.batch_size
+        total_samples = batch_size[0] * batch_size[1]  # num_envs * trajectory_length_per_env
+        tensordict_data_squeezed = tensordict_data.view(total_samples)
+
+        print(f"Batch size: {batch_size}")
+        print(f"Total samples: {total_samples}")
 
         # Calculate advantage once for the entire trajectory
         with torch.no_grad():
@@ -177,7 +179,7 @@ def main():
             replay_buffer.empty() # Clear buffer before filling with new trajectory data for this epoch set
             replay_buffer.extend(tensordict_data_squeezed.cpu()) # Add all data from the current trajectory
 
-            for _batch_idx in range(TRAJECTORY_SIZE // PPO_BATCH_SIZE):
+            for _batch_idx in range(total_samples // PPO_BATCH_SIZE):
                 subdata = replay_buffer.sample(PPO_BATCH_SIZE)
                 
                 loss_vals = ppo_loss(subdata.to(device))
@@ -203,7 +205,7 @@ def main():
         logger.log_scalar("train/reward_mean", tensordict_data_squeezed["next", "reward"].mean().item(), step=i)
         logger.log_scalar("train/reward_sum", tensordict_data_squeezed["next", "reward"].sum().item(), step=i)
 
-        pbar.update(tensordict_data_squeezed.numel())
+        pbar.update(total_samples)
         
         if i % 10 == 0:
             # Clear CUDA cache before evaluation
@@ -222,15 +224,15 @@ def main():
                     logger.log_scalar("eval/reward_sum", eval_reward_sum, step=i)
                     
                     # Save video every 50 iterations
-                    if i % 50 == 0:
+                    if i % 20 == 0:
                         try:
                             # Extract pixel frames from rollout
-                            # Shape should be [1, sequence_length, channels, height, width]
+                            # Shape should be [NUM_ENVS, sequence_length, channels, height, width]
                             pixel_frames = eval_rollout["pixels"].cpu().numpy()
                             
-                            # Remove batch dimension and convert to numpy: [seq_len, C, H, W]
+                            # Take only the first environment's frames: [sequence_length, channels, height, width]
                             if pixel_frames.ndim == 5:
-                                pixel_frames = pixel_frames.squeeze(0)  # Remove batch dim
+                                pixel_frames = pixel_frames[0]  # Select first environment
                             
                             # Convert from [seq_len, C, H, W] to [seq_len, H, W, C] for video writing
                             pixel_frames = np.transpose(pixel_frames, (0, 2, 3, 1))
