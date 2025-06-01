@@ -39,14 +39,14 @@ import numpy as np
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 
-TRAJECTORY_SIZE = 4_096
+TRAJECTORY_SIZE = 32_768
 LEARNING_RATE_ACTOR = 3e-4
 LEARNING_RATE_CRITIC = 1e-3
 
 PPO_EPS = 0.2
 PPO_EPOCHS = 10
 PPO_BATCH_SIZE = 256
-NUM_ENVS = 128
+NUM_ENVS = 32
 
 is_fork = multiprocessing.get_start_method() == "fork"
 device = (
@@ -60,7 +60,7 @@ print(f"Using device: {device}")
 
 def main():
     # Start with simpler environment for initial learning
-    env = ParallelEnv(NUM_ENVS, lambda: GymWrapper(SnakeEnv(num_bots=5, num_foods=20)))  # Reduced from 20 bots, 50 foods
+    env = ParallelEnv(NUM_ENVS, lambda: GymWrapper(SnakeEnv(num_bots=20, num_foods=50)))
 
     # Define the transforms to apply to the environment
     frameskip_transform = FrameSkipTransform(4)
@@ -286,14 +286,14 @@ def main():
 
         pbar.update(total_samples)
         
-        if i % 10 == 0:
+        if i % 5 == 0:
             # Clear CUDA cache before evaluation
             torch.cuda.empty_cache()
             
             with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
                 # execute a rollout with the trained policy
                 try:
-                    eval_rollout = env.rollout(1000, policy_module, break_when_any_done=False)
+                    eval_rollout = env.rollout(500, policy_module, break_when_any_done=False)
 
                     # Move to CPU immediately to avoid CUDA memory issues
                     eval_reward_mean = eval_rollout["next", "reward"].cpu().mean().item()
@@ -302,8 +302,8 @@ def main():
                     logger.log_scalar("eval/reward_mean", eval_reward_mean, step=i)
                     logger.log_scalar("eval/reward_sum", eval_reward_sum, step=i)
                     
-                    # Save video every 20 iterations
-                    if i % 20 == 0:
+                    # Save video every 10 iterations
+                    if i % 10 == 0:
                         try:
                             # Extract pixel frames from rollout
                             # Shape should be [NUM_ENVS, sequence_length, channels, height, width]
