@@ -2,6 +2,9 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
+# Set CUDA memory configuration to help with fragmentation
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
 from tqdm import tqdm
 import torch
 from torch import nn
@@ -10,7 +13,7 @@ from training.lib.model import ModelActor, ModelCritic
 import multiprocessing
 from snake_env.envs.snake_env import SnakeEnv
 from torchrl.envs.libs.gym import GymWrapper
-from torchrl.envs.transforms import ToTensorImage, TransformedEnv, Resize, GrayScale
+from torchrl.envs.transforms import ToTensorImage, TransformedEnv, Resize, GrayScale, FrameSkipTransform
 from tensordict.nn import TensorDictModule
 from tensordict.nn.distributions import NormalParamExtractor
 import torch.optim as optim
@@ -39,8 +42,8 @@ LEARNING_RATE_CRITIC = 1e-4
 
 PPO_EPS = 0.2
 PPO_EPOCHS = 10
-PPO_BATCH_SIZE = 64
-NUM_ENVS = 16
+PPO_BATCH_SIZE = 32
+NUM_ENVS = 8
 
 is_fork = multiprocessing.get_start_method() == "fork"
 device = (
@@ -56,6 +59,7 @@ def main():
     env = ParallelEnv(NUM_ENVS, lambda: GymWrapper(SnakeEnv(num_bots=20, num_foods=50)))
 
     # Define the transforms to apply to the environment
+    frameskip_transform = FrameSkipTransform(4)
     resize_transform = Resize(84)
     grayscale_transform = GrayScale()
     
@@ -66,8 +70,7 @@ def main():
     ))
 
     # Test the env and get initial data spec
-    initial_data = env.reset() 
-    print(f"Initial pixels shape: {initial_data['pixels'].shape}")
+    initial_data = env.reset()
     # Remove batch dimension to get the actual observation shape
     transformed_obs_shape = initial_data["pixels"].shape[-3:]  # Take last 3 dimensions: (C, H, W)
 
@@ -165,9 +168,6 @@ def main():
         total_samples = batch_size[0] * batch_size[1]  # num_envs * trajectory_length_per_env
         tensordict_data_squeezed = tensordict_data.view(total_samples)
 
-        print(f"Batch size: {batch_size}")
-        print(f"Total samples: {total_samples}")
-
         # Calculate advantage once for the entire trajectory
         with torch.no_grad():
             advantage_module(tensordict_data_squeezed)
@@ -194,16 +194,23 @@ def main():
                 optimizer.step()
                 optimizer.zero_grad()
                 
-                # Clean up batch data
+                # Clean up batch data immediately
                 del subdata, loss_vals, loss_value
-        
-        # Clean up trajectory data after all epochs
-        # del tensordict_data_squeezed
-        torch.cuda.empty_cache()
+                
+                # Clear GPU cache every few batches
+                if _batch_idx % 5 == 0:
+                    torch.cuda.empty_cache()
+            
+            # Clear GPU cache after each epoch
+            torch.cuda.empty_cache()
 
         # Log metrics to TensorBoard
         logger.log_scalar("train/reward_mean", tensordict_data_squeezed["next", "reward"].mean().item(), step=i)
         logger.log_scalar("train/reward_sum", tensordict_data_squeezed["next", "reward"].sum().item(), step=i)
+
+        # Clean up trajectory data after all epochs
+        del tensordict_data_squeezed, tensordict_data
+        torch.cuda.empty_cache()
 
         pbar.update(total_samples)
         
@@ -223,7 +230,7 @@ def main():
                     logger.log_scalar("eval/reward_mean", eval_reward_mean, step=i)
                     logger.log_scalar("eval/reward_sum", eval_reward_sum, step=i)
                     
-                    # Save video every 50 iterations
+                    # Save video every 20 iterations
                     if i % 20 == 0:
                         try:
                             # Extract pixel frames from rollout
@@ -247,23 +254,25 @@ def main():
                             if pixel_frames.shape[-1] == 1:
                                 pixel_frames = np.repeat(pixel_frames, 3, axis=-1)
                             
+                            # Take only every 4th frame to reduce video size and memory
+                            pixel_frames = pixel_frames[::4]
+                            
                             # Save video
                             video_path = f"{videos_dir}/eval_episode_{i:06d}.mp4"
-                            print(f"Saving video to {video_path} with shape {pixel_frames.shape}")
                             
                             # Use imageio to write video (30 fps)
                             imageio.mimwrite(video_path, pixel_frames, fps=30, quality=8)
-                            print(f"Video saved successfully!")
                             
                         except Exception as video_error:
-                            print(f"Failed to save video: {video_error}")
+                            print(f"Failed to save video: {video_error}") # TODO: Handle this better
                     
-                    # Clean up evaluation rollout
+                    # Clean up evaluation rollout immediately
                     del eval_rollout
                     torch.cuda.empty_cache()
                     
                 except Exception as e:
                     print(f"Evaluation failed: {e}")
+                    torch.cuda.empty_cache()
 
     collector.shutdown() # Ensure collector resources are released
     pbar.close()
