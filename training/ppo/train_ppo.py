@@ -195,8 +195,6 @@ def main():
         # Log metrics to TensorBoard
         logger.log_scalar("train/reward", tensordict_data_squeezed["next", "reward"].mean().item(), step=i)
         pbar.update(tensordict_data_squeezed.numel())
-        logger.log_scalar("train/step_count", 2049, step=i)  # Use trajectory length as step count
-        logger.log_scalar("train/lr", optimizer.param_groups[0]["lr"], step=i)
         
         if i % 10 == 0:
             # Clear CUDA cache before evaluation
@@ -205,7 +203,7 @@ def main():
             with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
                 # execute a rollout with the trained policy
                 try:
-                    eval_rollout = env.rollout(100, policy_module)  # Reduced from 1000 to 100 steps
+                    eval_rollout = env.rollout(1000, policy_module)  # Reduced from 1000 to 100 steps
                     
                     # Move to CPU immediately to avoid CUDA memory issues
                     eval_reward_mean = eval_rollout["next", "reward"].cpu().mean().item()
@@ -213,19 +211,6 @@ def main():
                     
                     logger.log_scalar("eval/reward_mean", eval_reward_mean, step=i)
                     logger.log_scalar("eval/reward_sum", eval_reward_sum, step=i)
-                    
-                    # Handle step_count safely
-                    if "step_count" in eval_rollout.keys():
-                        eval_step_count = eval_rollout["step_count"].cpu().max().item()
-                    else:
-                        eval_step_count = 100  # Use rollout length as fallback
-                    
-                    logger.log_scalar("eval/step_count", eval_step_count, step=i)
-                    
-                    eval_str = (
-                        f"eval cumulative reward: {eval_reward_sum: 4.4f}, "
-                        f"eval step-count: {eval_step_count}"
-                    )
                     
                     # Clean up evaluation rollout
                     del eval_rollout
