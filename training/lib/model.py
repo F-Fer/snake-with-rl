@@ -4,7 +4,7 @@ import math
 import torch.nn as nn
 import gymnasium as gym
 
-HID_SIZE = 64
+HID_SIZE = 256
 
 
 def calculate_conv_output_size(input_size, kernel_size, stride, padding=0):

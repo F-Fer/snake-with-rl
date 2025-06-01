@@ -39,14 +39,14 @@ import numpy as np
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 
-TRAJECTORY_SIZE = 8_192
+TRAJECTORY_SIZE = 4_096
 LEARNING_RATE_ACTOR = 3e-4
 LEARNING_RATE_CRITIC = 1e-3
 
 PPO_EPS = 0.2
 PPO_EPOCHS = 10
-PPO_BATCH_SIZE = 32
-NUM_ENVS = 8
+PPO_BATCH_SIZE = 256
+NUM_ENVS = 128
 
 is_fork = multiprocessing.get_start_method() == "fork"
 device = (
@@ -189,7 +189,34 @@ def main():
 
         # Calculate advantage once for the entire trajectory
         with torch.no_grad():
-            advantage_module(tensordict_data_squeezed)
+            # Process advantage calculation in chunks to avoid memory issues
+            chunk_size = 1024
+            num_chunks = (total_samples + chunk_size - 1) // chunk_size
+            
+            for chunk_idx in range(num_chunks):
+                start_idx = chunk_idx * chunk_size
+                end_idx = min(start_idx + chunk_size, total_samples)
+                
+                chunk_data = tensordict_data_squeezed[start_idx:end_idx]
+                advantage_module(chunk_data)
+                
+                # Copy the computed values back to the original tensor
+                if chunk_idx == 0:
+                    # Initialize the full tensors on first chunk
+                    full_advantage = chunk_data["advantage"].clone()
+                    full_value_target = chunk_data["value_target"].clone()
+                else:
+                    # Concatenate subsequent chunks
+                    full_advantage = torch.cat([full_advantage, chunk_data["advantage"]], dim=0)
+                    full_value_target = torch.cat([full_value_target, chunk_data["value_target"]], dim=0)
+                
+                # Clear chunk data to free memory
+                del chunk_data
+                torch.cuda.empty_cache()
+            
+            # Set the computed values back to the original tensor
+            tensordict_data_squeezed["advantage"] = full_advantage
+            tensordict_data_squeezed["value_target"] = full_value_target
             # tensordict_data_squeezed now contains "advantage" and "value_target"
 
         
