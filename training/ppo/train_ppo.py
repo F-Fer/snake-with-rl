@@ -2,7 +2,6 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from collections import defaultdict
 from tqdm import tqdm
 import torch
 from torch import nn
@@ -25,6 +24,9 @@ from torchrl.data.replay_buffers.storages import LazyTensorStorage
 from torchrl.data.replay_buffers import ReplayBuffer
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.envs import ParallelEnv
+from torchrl.record.loggers.tensorboard import TensorboardLogger
+from datetime import datetime
+
 
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
@@ -146,7 +148,9 @@ def main():
 
     optimizer = optim.Adam(ppo_loss.parameters(), lr=LEARNING_RATE_ACTOR)
 
-    logs = defaultdict(list)
+    # Initialize TensorBoard logger
+    logger = TensorboardLogger(exp_name=f"snake_ppo_training_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}", log_dir="logs")
+    
     eval_str = ""
     pbar = tqdm(total=collector.total_frames) # Use collector's actual total frames
 
@@ -188,10 +192,11 @@ def main():
         # del tensordict_data_squeezed
         torch.cuda.empty_cache()
 
-        logs["reward"].append(tensordict_data_squeezed["next", "reward"].mean().item())
+        # Log metrics to TensorBoard
+        logger.log_scalar("train/reward", tensordict_data_squeezed["next", "reward"].mean().item(), step=i)
         pbar.update(tensordict_data_squeezed.numel())
-        logs["step_count"].append(2049)  # Use trajectory length as step count
-        logs["lr"].append(optimizer.param_groups[0]["lr"])
+        logger.log_scalar("train/step_count", 2049, step=i)  # Use trajectory length as step count
+        logger.log_scalar("train/lr", optimizer.param_groups[0]["lr"], step=i)
         
         if i % 10 == 0:
             # Clear CUDA cache before evaluation
@@ -206,19 +211,20 @@ def main():
                     eval_reward_mean = eval_rollout["next", "reward"].cpu().mean().item()
                     eval_reward_sum = eval_rollout["next", "reward"].cpu().sum().item()
                     
-                    logs["eval reward"].append(eval_reward_mean)
-                    logs["eval reward (sum)"].append(eval_reward_sum)
+                    logger.log_scalar("eval/reward_mean", eval_reward_mean, step=i)
+                    logger.log_scalar("eval/reward_sum", eval_reward_sum, step=i)
                     
                     # Handle step_count safely
                     if "step_count" in eval_rollout.keys():
-                        logs["eval step_count"].append(eval_rollout["step_count"].cpu().max().item())
+                        eval_step_count = eval_rollout["step_count"].cpu().max().item()
                     else:
-                        logs["eval step_count"].append(100)  # Use rollout length as fallback
+                        eval_step_count = 100  # Use rollout length as fallback
+                    
+                    logger.log_scalar("eval/step_count", eval_step_count, step=i)
                     
                     eval_str = (
-                        f"eval cumulative reward: {logs['eval reward (sum)'][-1]: 4.4f} "
-                        f"(init: {logs['eval reward (sum)'][0]: 4.4f}), "
-                        f"eval step-count: {logs['eval step_count'][-1]}"
+                        f"eval cumulative reward: {eval_reward_sum: 4.4f}, "
+                        f"eval step-count: {eval_step_count}"
                     )
                     
                     # Clean up evaluation rollout
@@ -227,7 +233,6 @@ def main():
                     
                 except Exception as e:
                     print(f"Evaluation failed: {e}")
-                    eval_str = "eval failed"
 
     collector.shutdown() # Ensure collector resources are released
     pbar.close()
