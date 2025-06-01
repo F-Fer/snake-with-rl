@@ -11,7 +11,7 @@ from training.lib.model import ModelActor, ModelCritic
 import multiprocessing
 from snake_env.envs.snake_env import SnakeEnv
 from torchrl.envs.libs.gym import GymWrapper
-from torchrl.envs.transforms import ToTensorImage, TransformedEnv
+from torchrl.envs.transforms import ToTensorImage, TransformedEnv, Resize, GrayScale
 from tensordict.nn import TensorDictModule
 from tensordict.nn.distributions import NormalParamExtractor
 import torch.optim as optim
@@ -50,10 +50,14 @@ print(f"Using device: {device}")
 def main():
     env = ParallelEnv(1, lambda: GymWrapper(SnakeEnv()))
 
+    # Define the transforms to apply to the environment
+    resize_transform = Resize(84)
+    grayscale_transform = GrayScale()
+    
     env = TransformedEnv(env, Compose(
-        # ToTensorImage expects "observation" as default in_key if env.observation_spec is standard
-        # It will output a tensor under the same key "observation"
-        ToTensorImage(in_keys=["pixels"], dtype=torch.float32)
+        ToTensorImage(in_keys=["pixels"], dtype=torch.float32),
+        resize_transform,
+        grayscale_transform
     ))
 
     # Test the env and get initial data spec
@@ -181,7 +185,7 @@ def main():
                 del subdata, loss_vals, loss_value
         
         # Clean up trajectory data after all epochs
-        del tensordict_data_squeezed
+        # del tensordict_data_squeezed
         torch.cuda.empty_cache()
 
         logs["reward"].append(tensordict_data_squeezed["next", "reward"].mean().item())

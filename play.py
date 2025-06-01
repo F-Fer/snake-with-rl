@@ -6,7 +6,7 @@ import math
 import numpy as np
 
 def play_snake():
-    env = gym.make('Snake-v0', num_bots=3, num_foods=20, world_size=3000, screen_size=256, zoom_level=1.0)
+    env = gym.make('Snake-v0')
 
     pygame.init()
     display_width = 600  

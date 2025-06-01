@@ -16,6 +16,7 @@ dependencies = [
     "pygame>=2.1.0",
     "tensordict>=0.8.3",
     "torchrl>=0.8.1",
+    "torchvision>=0.22.0",
     "tqdm>=4.67.1",
 ]
 

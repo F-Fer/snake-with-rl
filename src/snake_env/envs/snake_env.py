@@ -208,7 +208,7 @@ class SnakeEnv(gym.Env):
     C2 = 10   # For eliminating an opponent
     C3 = 100  # For death
     
-    def __init__(self, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10, screen_size=84, zoom_level=1.0):
+    def __init__(self, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10, screen_size=256, zoom_level=1.0):
         self.screen_size = screen_size  
         self.render_mode = "rgb_array" 
         self.zoom_level = zoom_level 
