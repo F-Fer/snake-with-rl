@@ -26,6 +26,8 @@ from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.envs import ParallelEnv
 from torchrl.record.loggers.tensorboard import TensorboardLogger
 from datetime import datetime
+import imageio
+import numpy as np
 
 
 GAMMA = 0.99
@@ -149,7 +151,12 @@ def main():
     optimizer = optim.Adam(ppo_loss.parameters(), lr=LEARNING_RATE_ACTOR)
 
     # Initialize TensorBoard logger
-    logger = TensorboardLogger(exp_name=f"snake_ppo_training_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}", log_dir="logs")
+    run_name = f"snake_ppo_training_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    logger = TensorboardLogger(exp_name=run_name, log_dir="logs")
+    
+    # Create videos directory
+    videos_dir = f"videos/{run_name}"
+    os.makedirs(videos_dir, exist_ok=True)
     
     eval_str = ""
     pbar = tqdm(total=collector.total_frames) # Use collector's actual total frames
@@ -203,14 +210,50 @@ def main():
             with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
                 # execute a rollout with the trained policy
                 try:
-                    eval_rollout = env.rollout(1000, policy_module)  # Reduced from 1000 to 100 steps
-                    
+                    eval_rollout = env.rollout(1000, policy_module)  # 500 steps for video
+                    print(f"Eval rollout: {eval_rollout['pixels'].shape}")
+
                     # Move to CPU immediately to avoid CUDA memory issues
                     eval_reward_mean = eval_rollout["next", "reward"].cpu().mean().item()
                     eval_reward_sum = eval_rollout["next", "reward"].cpu().sum().item()
                     
                     logger.log_scalar("eval/reward_mean", eval_reward_mean, step=i)
                     logger.log_scalar("eval/reward_sum", eval_reward_sum, step=i)
+                    
+                    # Save video every 50 iterations
+                    if i % 50 == 0:
+                        try:
+                            # Extract pixel frames from rollout
+                            # Shape should be [1, sequence_length, channels, height, width]
+                            pixel_frames = eval_rollout["pixels"].cpu().numpy()
+                            
+                            # Remove batch dimension and convert to numpy: [seq_len, C, H, W]
+                            if pixel_frames.ndim == 5:
+                                pixel_frames = pixel_frames.squeeze(0)  # Remove batch dim
+                            
+                            # Convert from [seq_len, C, H, W] to [seq_len, H, W, C] for video writing
+                            pixel_frames = np.transpose(pixel_frames, (0, 2, 3, 1))
+                            
+                            # Ensure values are in 0-255 range
+                            if pixel_frames.max() <= 1.0:
+                                pixel_frames = (pixel_frames * 255).astype(np.uint8)
+                            else:
+                                pixel_frames = pixel_frames.astype(np.uint8)
+                            
+                            # If grayscale (single channel), convert to RGB
+                            if pixel_frames.shape[-1] == 1:
+                                pixel_frames = np.repeat(pixel_frames, 3, axis=-1)
+                            
+                            # Save video
+                            video_path = f"{videos_dir}/eval_episode_{i:06d}.mp4"
+                            print(f"Saving video to {video_path} with shape {pixel_frames.shape}")
+                            
+                            # Use imageio to write video (30 fps)
+                            imageio.mimwrite(video_path, pixel_frames, fps=30, quality=8)
+                            print(f"Video saved successfully!")
+                            
+                        except Exception as video_error:
+                            print(f"Failed to save video: {video_error}")
                     
                     # Clean up evaluation rollout
                     del eval_rollout
