@@ -12,6 +12,68 @@ def calculate_conv_output_size(input_size, kernel_size, stride, padding=0):
     return (input_size + 2 * padding - kernel_size) // stride + 1
 
 
+class ResBlock(nn.Module):
+    def __init__(self, in_channels):
+        super(ResBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=3, stride=1, padding=1)
+        self.relu = nn.ReLU()
+
+    def forward(self, x_in):
+        x = self.relu(x_in)
+        x = self.relu(self.conv1(x))
+        x_out = self.conv2(x)
+        return x_in + x_out
+
+
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, block_channels):
+        super(ConvBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=block_channels, kernel_size=3, stride=1, padding=1)
+        self.max_pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.res1 = ResBlock(block_channels)
+        self.res2 = ResBlock(block_channels)
+
+    def forward(self, x_in):
+        x = self.conv1(x_in)
+        x = self.max_pool(x)
+        x = self.res1(x)
+        return self.res2(x)
+    
+
+class ConvNet(nn.Module):
+    def __init__(self, in_channels, base_channels=16):
+        super(ConvNet, self).__init__()
+        self.conv1 = ConvBlock(in_channels=in_channels, block_channels=base_channels)
+        self.conv2 = ConvBlock(in_channels=base_channels, block_channels=base_channels * 2)
+        self.conv3 = ConvBlock(in_channels=base_channels * 2, block_channels=base_channels * 2)
+        self.flatten = nn.Flatten()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = self.flatten(x)
+        return x
+    
+class ModelResidual(nn.Module):
+    def __init__(self, channels_in: int, num_outputs: int, hidden_size=HID_SIZE, base_channels=16):
+        super(ModelResidual, self).__init__()
+        self.conv_net = ConvNet(in_channels=channels_in, base_channels=base_channels)
+        self.linear = nn.LazyLinear(hidden_size)
+        self.relu = nn.ReLU()
+        self.tanh = nn.Tanh()
+        self.linear2 = nn.Linear(hidden_size, num_outputs)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.relu(self.conv_net(x))
+        x = self.tanh(self.linear(x))
+        x = self.linear2(x)
+        return x
+        
+        
+
+
 class ModelActor(nn.Module):
     def __init__(self, obs_shape: tuple, act_size: int):
         super(ModelActor, self).__init__()

@@ -12,7 +12,7 @@ from tqdm import tqdm
 import torch
 from torch import nn
 import typing as tt
-from training.lib.model import ModelActor, ModelCritic
+from training.lib.model import ModelActor, ModelCritic, ModelResidual
 import multiprocessing
 from snake_env.envs.snake_env import SnakeEnv
 from torchrl.envs.libs.gym import GymWrapper
@@ -39,7 +39,7 @@ import numpy as np
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 
-TRAJECTORY_SIZE = 16_384
+TRAJECTORY_SIZE = 8_192
 LEARNING_RATE_ACTOR = 3e-4
 LEARNING_RATE_CRITIC = 1e-3
 
@@ -70,8 +70,8 @@ def main():
     env = TransformedEnv(env, Compose(
         frameskip_transform,
         ToTensorImage(in_keys=["pixels"], dtype=torch.float32),
-        resize_transform,
-        grayscale_transform
+        grayscale_transform,
+        resize_transform
     ))
 
     # Test the env and get initial data spec
@@ -79,8 +79,11 @@ def main():
     # Remove batch dimension to get the actual observation shape
     transformed_obs_shape = initial_data["pixels"].shape[-3:]  # Take last 3 dimensions: (C, H, W)
 
-    actor_net_core = ModelActor(transformed_obs_shape, env.action_spec.shape[-1]).to(device)
-    critic_net = ModelCritic(transformed_obs_shape).to(device)
+    # actor_net_core = ModelActor(transformed_obs_shape, env.action_spec.shape[-1]).to(device)
+    # critic_net = ModelCritic(transformed_obs_shape).to(device)
+    actor_net_core = ModelResidual(channels_in=transformed_obs_shape[0], num_outputs=env.action_spec.shape[-1] * 2).to(device)
+    critic_net = ModelResidual(channels_in=transformed_obs_shape[0], num_outputs=1).to(device)
+
 
     # Initialize the actor and critic networks
     with torch.no_grad():
@@ -89,6 +92,12 @@ def main():
         # Initialize the lazy layers properly
         actor_output = actor_net_core(test_input.to(device))
         critic_output = critic_net(test_input.to(device))
+
+    num_params = sum(p.numel() for p in actor_net_core.parameters())
+    bytes_per_param = 4  # for float32, use 2 for float16, 1 for int8, etc.
+    total_bytes = num_params * bytes_per_param
+    total_mb = total_bytes / (1024 ** 2)
+    print(f"Model size: {total_mb:.2f} MB")
 
     # Actor network produces raw parameters for the distribution
     actor_network_with_extractor = nn.Sequential(
