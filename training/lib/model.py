@@ -17,7 +17,7 @@ class ModelActor(nn.Module):
         super(ModelActor, self).__init__()
         
         # Calculate the size after convolutions
-        # Input: (C, H, W) = (3, 84, 84)
+        # Input: (C, H, W) = (1, 84, 84) for grayscale
         c, h, w = obs_shape
         
         # First conv: kernel=8, stride=4
@@ -57,7 +57,7 @@ class ModelCritic(nn.Module):
         super(ModelCritic, self).__init__()
         
         # Calculate the size after convolutions
-        # Input: (C, H, W) = (3, 84, 84)
+        # Input: (C, H, W) = (1, 84, 84) for grayscale
         c, h, w = obs_shape
         
         # First conv: kernel=8, stride=4

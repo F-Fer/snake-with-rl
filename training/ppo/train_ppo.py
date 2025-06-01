@@ -68,6 +68,7 @@ def main():
     grayscale_transform = GrayScale()
     
     env = TransformedEnv(env, Compose(
+        frameskip_transform,
         ToTensorImage(in_keys=["pixels"], dtype=torch.float32),
         resize_transform,
         grayscale_transform
@@ -204,9 +205,9 @@ def main():
                     + loss_vals["loss_entropy"]
                 )
                 
-                batch_losses_actor.append(loss_vals["loss_objective"].item())
-                batch_losses_critic.append(loss_vals["loss_critic"].item())
-                batch_losses_entropy.append(loss_vals["loss_entropy"].item())
+                batch_losses_actor.append(loss_vals["loss_objective"].cpu().item())
+                batch_losses_critic.append(loss_vals["loss_critic"].cpu().item())
+                batch_losses_entropy.append(loss_vals["loss_entropy"].cpu().item())
 
                 loss_value.backward()
                 torch.nn.utils.clip_grad_norm_(ppo_loss.parameters(), GRAD_CLIP_VALUE)
@@ -256,7 +257,7 @@ def main():
             with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
                 # execute a rollout with the trained policy
                 try:
-                    eval_rollout = env.rollout(100, policy_module)
+                    eval_rollout = env.rollout(1000, policy_module, break_when_any_done=False)
 
                     # Move to CPU immediately to avoid CUDA memory issues
                     eval_reward_mean = eval_rollout["next", "reward"].cpu().mean().item()
@@ -288,9 +289,6 @@ def main():
                             # If grayscale (single channel), convert to RGB
                             if pixel_frames.shape[-1] == 1:
                                 pixel_frames = np.repeat(pixel_frames, 3, axis=-1)
-                            
-                            # Take only every 4th frame to reduce video size and memory
-                            pixel_frames = pixel_frames[::4]
                             
                             # Save video
                             video_path = f"{videos_dir}/eval_episode_{i:06d}.mp4"
