@@ -56,23 +56,21 @@ class ConvNet(nn.Module):
         x = self.flatten(x)
         return x
     
+    
 class ModelResidual(nn.Module):
     def __init__(self, channels_in: int, num_outputs: int, hidden_size=HID_SIZE, base_channels=16):
         super(ModelResidual, self).__init__()
         self.conv_net = ConvNet(in_channels=channels_in, base_channels=base_channels)
         self.linear = nn.LazyLinear(hidden_size)
         self.relu = nn.ReLU()
-        self.tanh = nn.Tanh()
         self.linear2 = nn.Linear(hidden_size, num_outputs)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.relu(self.conv_net(x))
-        x = self.tanh(self.linear(x))
+        x = self.relu(self.linear(x))
         x = self.linear2(x)
         return x
         
-        
-
 
 class ModelActor(nn.Module):
     def __init__(self, obs_shape: tuple, act_size: int):
