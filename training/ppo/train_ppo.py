@@ -16,7 +16,7 @@ from training.lib.model import ModelActor, ModelCritic, ModelResidual
 import multiprocessing
 from snake_env.envs.snake_env import SnakeEnv
 from torchrl.envs.libs.gym import GymWrapper
-from torchrl.envs.transforms import ToTensorImage, TransformedEnv, Resize, FrameSkipTransform, GrayScale
+from torchrl.envs.transforms import ToTensorImage, TransformedEnv, Resize, FrameSkipTransform, GrayScale, CatFrames
 from tensordict.nn import TensorDictModule
 from tensordict.nn.distributions import NormalParamExtractor
 import torch.optim as optim
@@ -39,14 +39,14 @@ import numpy as np
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 
-TRAJECTORY_SIZE = 32_768
+TRAJECTORY_SIZE = 16_384
 LEARNING_RATE_ACTOR = 3e-4
 LEARNING_RATE_CRITIC = 1e-3
 
 PPO_EPS = 0.2
-PPO_EPOCHS = 10
+PPO_EPOCHS = 3
 PPO_BATCH_SIZE = 256
-NUM_ENVS = 32
+NUM_ENVS = 16
 
 is_fork = multiprocessing.get_start_method() == "fork"
 device = (
@@ -66,12 +66,13 @@ def main():
     frameskip_transform = FrameSkipTransform(4)
     resize_transform = Resize(84)
     grayscale_transform = GrayScale()
-    
+
     env = TransformedEnv(env, Compose(
         frameskip_transform,
         ToTensorImage(in_keys=["pixels"], dtype=torch.float32),
         grayscale_transform,
-        resize_transform
+        resize_transform,
+        CatFrames(dim=-3, N=2, in_keys=["pixels"])
     ))
 
     # Test the env and get initial data spec
@@ -79,10 +80,10 @@ def main():
     # Remove batch dimension to get the actual observation shape
     transformed_obs_shape = initial_data["pixels"].shape[-3:]  # Take last 3 dimensions: (C, H, W)
 
-    # actor_net_core = ModelActor(transformed_obs_shape, env.action_spec.shape[-1]).to(device)
-    # critic_net = ModelCritic(transformed_obs_shape).to(device)
-    actor_net_core = ModelResidual(channels_in=transformed_obs_shape[0], num_outputs=env.action_spec.shape[-1] * 2).to(device)
-    critic_net = ModelResidual(channels_in=transformed_obs_shape[0], num_outputs=1).to(device)
+    actor_net_core = ModelActor(transformed_obs_shape, env.action_spec.shape[-1]).to(device)
+    critic_net = ModelCritic(transformed_obs_shape).to(device)
+    # actor_net_core = ModelResidual(channels_in=transformed_obs_shape[0], num_outputs=env.action_spec.shape[-1] * 2).to(device)
+    # critic_net = ModelResidual(channels_in=transformed_obs_shape[0], num_outputs=1).to(device)
 
 
     # Initialize the actor and critic networks
@@ -92,12 +93,6 @@ def main():
         # Initialize the lazy layers properly
         actor_output = actor_net_core(test_input.to(device))
         critic_output = critic_net(test_input.to(device))
-
-    num_params = sum(p.numel() for p in actor_net_core.parameters())
-    bytes_per_param = 4  # for float32, use 2 for float16, 1 for int8, etc.
-    total_bytes = num_params * bytes_per_param
-    total_mb = total_bytes / (1024 ** 2)
-    print(f"Model size: {total_mb:.2f} MB")
 
     # Actor network produces raw parameters for the distribution
     actor_network_with_extractor = nn.Sequential(
@@ -143,7 +138,7 @@ def main():
 
     replay_buffer = ReplayBuffer(
         storage=LazyTensorStorage(max_size=PPO_BATCH_SIZE),
-        sampler=SamplerWithoutReplacement(),
+        sampler=SamplerWithoutReplacement()
     )
 
     advantage_module = GAE(
@@ -167,6 +162,14 @@ def main():
     optimizer_actor = optim.Adam(policy_module.parameters(), lr=LEARNING_RATE_ACTOR)
     optimizer_critic = optim.Adam(value_module.parameters(), lr=LEARNING_RATE_CRITIC)
     
+    # Add learning rate schedulers
+    scheduler_actor = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer_actor, T_max=1000, eta_min=1e-5
+    )
+    scheduler_critic = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer_critic, T_max=1000, eta_min=1e-4
+    )
+    
     # For gradient clipping
     GRAD_CLIP_VALUE = 1.0
 
@@ -182,6 +185,10 @@ def main():
     pbar = tqdm(total=collector.total_frames) # Use collector's actual total frames
 
     for i, tensordict_data in enumerate(collector):
+        # Set the networks to training mode
+        actor_net_core.train()
+        critic_net.train()
+
         # Reshape the data to flatten environment and trajectory dimensions
         # From [num_envs, trajectory_length_per_env, ...] to [total_samples, ...]
         batch_size = tensordict_data.batch_size
@@ -288,6 +295,14 @@ def main():
         # Clean up trajectory data after all epochs
         del tensordict_data_squeezed, tensordict_data
         torch.cuda.empty_cache()
+
+        # Step the learning rate schedulers
+        scheduler_actor.step()
+        scheduler_critic.step()
+
+        # Log learning rates
+        logger.log_scalar("train/lr_actor", scheduler_actor.get_last_lr()[0], step=i)
+        logger.log_scalar("train/lr_critic", scheduler_critic.get_last_lr()[0], step=i)
 
         pbar.update(total_samples)
         
