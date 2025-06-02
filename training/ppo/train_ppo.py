@@ -129,7 +129,7 @@ def main():
     value_module = TensorDictModule(
         critic_net,
         in_keys=["pixels"],
-        out_keys=["state_value"],
+        out_keys=["state_value"]
     )
 
     collector = SyncDataCollector(
@@ -151,7 +151,8 @@ def main():
         lmbda=GAE_LAMBDA,
         value_network=value_module,
         average_gae=True,
-        device=device
+        device=device,
+        differentiable=True
     )
 
     ppo_loss = ClipPPOLoss(
@@ -219,6 +220,10 @@ def main():
             tensordict_data_squeezed["value_target"] = full_value_target
             # tensordict_data_squeezed now contains "advantage" and "value_target"
 
+        # Normalize advantages
+        advantages = tensordict_data_squeezed["advantage"]
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        tensordict_data_squeezed["advantage"] = advantages
         
         # PPO update loop: multiple epochs over the collected trajectory
         epoch_losses_actor = []
