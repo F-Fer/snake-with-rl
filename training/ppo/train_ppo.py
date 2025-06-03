@@ -44,7 +44,7 @@ LEARNING_RATE_ACTOR = 3e-4
 LEARNING_RATE_CRITIC = 1e-3
 
 PPO_EPS = 0.2
-PPO_EPOCHS = 3
+PPO_EPOCHS = 10
 PPO_BATCH_SIZE = 256
 NUM_ENVS = 16
 
@@ -80,10 +80,10 @@ def main():
     # Remove batch dimension to get the actual observation shape
     transformed_obs_shape = initial_data["pixels"].shape[-3:]  # Take last 3 dimensions: (C, H, W)
 
-    actor_net_core = ModelActor(transformed_obs_shape, env.action_spec.shape[-1]).to(device)
-    critic_net = ModelCritic(transformed_obs_shape).to(device)
-    # actor_net_core = ModelResidual(channels_in=transformed_obs_shape[0], num_outputs=env.action_spec.shape[-1] * 2).to(device)
-    # critic_net = ModelResidual(channels_in=transformed_obs_shape[0], num_outputs=1).to(device)
+    # actor_net_core = ModelActor(transformed_obs_shape, env.action_spec.shape[-1]).to(device)
+    # critic_net = ModelCritic(transformed_obs_shape).to(device)
+    actor_net_core = ModelResidual(channels_in=transformed_obs_shape[0], num_outputs=env.action_spec.shape[-1] * 2).to(device)
+    critic_net = ModelResidual(channels_in=transformed_obs_shape[0], num_outputs=1).to(device)
 
 
     # Initialize the actor and critic networks
@@ -163,12 +163,12 @@ def main():
     optimizer_critic = optim.Adam(value_module.parameters(), lr=LEARNING_RATE_CRITIC)
     
     # Add learning rate schedulers
-    scheduler_actor = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer_actor, T_max=1000, eta_min=1e-5
-    )
-    scheduler_critic = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer_critic, T_max=1000, eta_min=1e-4
-    )
+    # scheduler_actor = optim.lr_scheduler.CosineAnnealingLR(
+    #    optimizer_actor, T_max=1000, eta_min=1e-5
+    #)
+    #scheduler_critic = optim.lr_scheduler.CosineAnnealingLR(
+    #    optimizer_critic, T_max=1000, eta_min=1e-4
+    #)
     
     # For gradient clipping
     GRAD_CLIP_VALUE = 1.0
@@ -220,7 +220,6 @@ def main():
                 
                 # Clear chunk data to free memory
                 del chunk_data
-                torch.cuda.empty_cache()
             
             # Set the computed values back to the original tensor
             tensordict_data_squeezed["advantage"] = full_advantage
@@ -267,15 +266,10 @@ def main():
                 # Clean up batch data immediately
                 del subdata, loss_vals, loss_value
                 
-                # Clear GPU cache every few batches
-                if _batch_idx % 5 == 0:
-                    torch.cuda.empty_cache()
             
             epoch_losses_actor.extend(batch_losses_actor)
             epoch_losses_critic.extend(batch_losses_critic)
             epoch_losses_entropy.extend(batch_losses_entropy)
-            # Clear GPU cache after each epoch
-            torch.cuda.empty_cache()
 
         # Log metrics to TensorBoard
         logger.log_scalar("train/reward_mean", tensordict_data_squeezed["next", "reward"].mean().item(), step=i)
@@ -292,23 +286,17 @@ def main():
             logger.log_scalar("train/loss_mean_entropy", np.mean(epoch_losses_entropy), step=i)
             logger.log_scalar("train/loss_std_entropy", np.std(epoch_losses_entropy), step=i)
 
-        # Clean up trajectory data after all epochs
-        del tensordict_data_squeezed, tensordict_data
-        torch.cuda.empty_cache()
-
         # Step the learning rate schedulers
-        scheduler_actor.step()
-        scheduler_critic.step()
+        # scheduler_actor.step()
+        # scheduler_critic.step()
 
         # Log learning rates
-        logger.log_scalar("train/lr_actor", scheduler_actor.get_last_lr()[0], step=i)
-        logger.log_scalar("train/lr_critic", scheduler_critic.get_last_lr()[0], step=i)
+        # logger.log_scalar("train/lr_actor", scheduler_actor.get_last_lr()[0], step=i)
+        # logger.log_scalar("train/lr_critic", scheduler_critic.get_last_lr()[0], step=i)
 
         pbar.update(total_samples)
         
         if i % 5 == 0:
-            # Clear CUDA cache before evaluation
-            torch.cuda.empty_cache()
             
             with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
                 # execute a rollout with the trained policy
@@ -355,13 +343,8 @@ def main():
                         except Exception as video_error:
                             print(f"Failed to save video: {video_error}")
                     
-                    # Clean up evaluation rollout immediately
-                    del eval_rollout
-                    torch.cuda.empty_cache()
-                    
                 except Exception as e:
                     print(f"Evaluation failed: {e}")
-                    torch.cuda.empty_cache()
 
     collector.shutdown() # Ensure collector resources are released
     pbar.close()
