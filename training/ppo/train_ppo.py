@@ -137,7 +137,7 @@ def main():
     )
 
     replay_buffer = ReplayBuffer(
-        storage=LazyTensorStorage(max_size=PPO_BATCH_SIZE),
+        storage=LazyTensorStorage(max_size=TRAJECTORY_SIZE),
         sampler=SamplerWithoutReplacement()
     )
 
