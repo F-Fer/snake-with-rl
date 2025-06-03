@@ -44,7 +44,7 @@ LEARNING_RATE_ACTOR = 3e-4
 LEARNING_RATE_CRITIC = 1e-3
 
 PPO_EPS = 0.2
-PPO_EPOCHS = 10
+PPO_EPOCHS = 8
 PPO_BATCH_SIZE = 256
 NUM_ENVS = 16
 
@@ -60,7 +60,7 @@ print(f"Using device: {device}")
 
 def main():
     # Start with simpler environment for initial learning
-    env = ParallelEnv(NUM_ENVS, lambda: GymWrapper(SnakeEnv(num_bots=20, num_foods=50)))
+    env = ParallelEnv(NUM_ENVS, lambda: GymWrapper(SnakeEnv(num_bots=20, num_foods=50, zoom_level=1.5)))
 
     # Define the transforms to apply to the environment
     frameskip_transform = FrameSkipTransform(4)
@@ -69,8 +69,8 @@ def main():
 
     env = TransformedEnv(env, Compose(
         frameskip_transform,
-        ToTensorImage(in_keys=["pixels"], dtype=torch.float32),
-        grayscale_transform,
+        ToTensorImage(in_keys=["pixels"], dtype=torch.uint8, from_int=False),  # Use uint8 to save memory
+        # grayscale_transform,
         resize_transform,
         CatFrames(dim=-3, N=2, in_keys=["pixels"])
     ))
@@ -316,6 +316,8 @@ def main():
                             # Extract pixel frames from rollout
                             # Shape should be [NUM_ENVS, sequence_length, channels, height, width]
                             pixel_frames = eval_rollout["pixels"].cpu().numpy()
+
+                            print(pixel_frames.shape)
                             
                             # Take only the first environment's frames: [sequence_length, channels, height, width]
                             if pixel_frames.ndim == 5:
@@ -323,11 +325,21 @@ def main():
                             
                             # Convert from [seq_len, C, H, W] to [seq_len, H, W, C] for video writing
                             pixel_frames = np.transpose(pixel_frames, (0, 2, 3, 1))
+
+                            # Handle frame stacking - take only the most recent frame (last 3 channels)
+                            if pixel_frames.shape[-1] > 3:
+                                pixel_frames = pixel_frames[:, :, :, -3:]  # Take last 3 channels (most recent frame)
                             
-                            # Ensure values are in 0-255 range
-                            if pixel_frames.max() <= 1.0:
+                            # Convert to proper format for video saving
+                            if pixel_frames.dtype == np.uint8:
+                                print("uint8")
+                                # Data is already in 0-255 range as uint8, just ensure it's the right type
+                                pixel_frames = pixel_frames.astype(np.uint8)
+                            elif pixel_frames.max() <= 1.0:
+                                # Data is in 0-1 range, convert to 0-255
                                 pixel_frames = (pixel_frames * 255).astype(np.uint8)
                             else:
+                                # Data might be in 0-255 range but as float, convert to uint8
                                 pixel_frames = pixel_frames.astype(np.uint8)
                             
                             # If grayscale (single channel), convert to RGB

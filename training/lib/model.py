@@ -66,6 +66,10 @@ class ModelResidual(nn.Module):
         self.linear2 = nn.Linear(hidden_size, num_outputs)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Convert uint8 to float32 and normalize to [0, 1] range
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0
+        
         x = self.relu(self.conv_net(x))
         x = self.relu(self.linear(x))
         x = self.linear2(x)
@@ -109,6 +113,10 @@ class ModelActor(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Convert uint8 to float32 and normalize to [0, 1] range
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0
+            
         return self.net(x)
 
 
@@ -149,4 +157,8 @@ class ModelCritic(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Convert uint8 to float32 and normalize to [0, 1] range
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0
+            
         return self.net(x)
