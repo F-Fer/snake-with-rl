@@ -12,7 +12,7 @@ from tqdm import tqdm
 import torch
 from torch import nn
 import typing as tt
-from training.lib.model import ModelActor, ModelCritic, ModelResidual
+from training.lib.model import ImpalaModel
 import multiprocessing
 from snake_env.envs.snake_env import SnakeEnv
 from torchrl.envs.libs.gym import GymWrapper
@@ -40,13 +40,13 @@ GAMMA = 0.99
 GAE_LAMBDA = 0.95
 
 TRAJECTORY_SIZE = 16_384
-LEARNING_RATE_ACTOR = 3e-4
-LEARNING_RATE_CRITIC = 1e-3
+LEARNING_RATE = 3e-4
 
 PPO_EPS = 0.2
 PPO_EPOCHS = 8
 PPO_BATCH_SIZE = 256
 NUM_ENVS = 16
+SEQUENCE_LENGTH = 32  # Length of sequences for LSTM
 
 is_fork = multiprocessing.get_start_method() == "fork"
 device = (
@@ -56,6 +56,66 @@ device = (
 )
 
 print(f"Using device: {device}")
+
+
+class ImpalaWrapper(nn.Module):
+    """Wrapper to make IMPALA model compatible with TorchRL's expected interface"""
+    def __init__(self, impala_model, num_envs):
+        super().__init__()
+        self.impala_model = impala_model
+        self.num_envs = num_envs
+        # Initialize hidden states for all environments
+        self.hidden_states = self.impala_model.initial_state(num_envs)
+        
+    def forward(self, obs):
+        # obs shape: (batch_size, channels, height, width)
+        # Need to add sequence dimension: (1, batch_size, channels, height, width)
+        obs_with_seq = obs.unsqueeze(0)
+        
+        # Forward pass through IMPALA
+        logits, values, self.hidden_states = self.impala_model(obs_with_seq, self.hidden_states)
+        
+        # Remove sequence dimension: (batch_size, num_actions), (batch_size, 1)
+        logits = logits.squeeze(0)
+        values = values.squeeze(0)
+        
+        return logits, values
+    
+    def reset_states(self, env_indices=None):
+        """Reset hidden states for specified environments (or all if None)"""
+        if env_indices is None:
+            self.hidden_states = self.impala_model.initial_state(self.num_envs)
+        else:
+            # Reset specific environments
+            initial_states = self.impala_model.initial_state(len(env_indices))
+            for i, env_idx in enumerate(env_indices):
+                self.hidden_states[0][env_idx] = initial_states[0][i]
+                self.hidden_states[1][env_idx] = initial_states[1][i]
+
+
+class PolicyModule(nn.Module):
+    """Policy module that extracts action parameters from IMPALA model"""
+    def __init__(self, impala_wrapper):
+        super().__init__()
+        self.impala_wrapper = impala_wrapper
+        
+    def forward(self, obs):
+        logits, _ = self.impala_wrapper(obs)
+        # Split logits into loc and scale for continuous actions
+        loc, scale = torch.chunk(logits, 2, dim=-1)
+        scale = torch.nn.functional.softplus(scale) + 1e-4  # Ensure positive scale
+        return {"loc": loc, "scale": scale}
+
+
+class ValueModule(nn.Module):
+    """Value module that extracts value from IMPALA model"""
+    def __init__(self, impala_wrapper):
+        super().__init__()
+        self.impala_wrapper = impala_wrapper
+        
+    def forward(self, obs):
+        _, values = self.impala_wrapper(obs)
+        return {"state_value": values.squeeze(-1)}
 
 
 def main():
@@ -80,29 +140,25 @@ def main():
     # Remove batch dimension to get the actual observation shape
     transformed_obs_shape = initial_data["pixels"].shape[-3:]  # Take last 3 dimensions: (C, H, W)
 
-    # actor_net_core = ModelActor(transformed_obs_shape, env.action_spec.shape[-1]).to(device)
-    # critic_net = ModelCritic(transformed_obs_shape).to(device)
-    actor_net_core = ModelResidual(channels_in=transformed_obs_shape[0], num_outputs=env.action_spec.shape[-1] * 2).to(device)
-    critic_net = ModelResidual(channels_in=transformed_obs_shape[0], num_outputs=1).to(device)
-
-
-    # Initialize the actor and critic networks
-    with torch.no_grad():
-        # Use the full tensor with batch dimension for proper initialization
-        test_input = initial_data["pixels"]  # Keep the batch dimension [1, 3, 84, 84]
-        # Initialize the lazy layers properly
-        actor_output = actor_net_core(test_input.to(device))
-        critic_output = critic_net(test_input.to(device))
-
-    # Actor network produces raw parameters for the distribution
-    actor_network_with_extractor = nn.Sequential(
-        actor_net_core,
-        NormalParamExtractor() # Splits the output of actor_net_core into loc and scale
+    # Create the IMPALA model
+    impala_model = ImpalaModel(
+        in_channels=transformed_obs_shape[0], 
+        num_actions=env.action_spec.shape[-1] * 2,  # *2 for loc and scale
+        height=transformed_obs_shape[1],
+        width=transformed_obs_shape[2],
+        device=device
     ).to(device)
+    
+    # Wrap the IMPALA model
+    impala_wrapper = ImpalaWrapper(impala_model, NUM_ENVS)
+    
+    # Create policy and value modules
+    policy_net = PolicyModule(impala_wrapper)
+    value_net = ValueModule(impala_wrapper)
 
     # This module will process "pixels" and output "loc" and "scale"
     policy_params_module = TensorDictModule(
-        module=actor_network_with_extractor,
+        module=policy_net,
         in_keys=["pixels"], 
         out_keys=["loc", "scale"]
     )
@@ -122,7 +178,7 @@ def main():
     ).to(device)
 
     value_module = TensorDictModule(
-        critic_net,
+        value_net,
         in_keys=["pixels"],
         out_keys=["state_value"]
     )
@@ -158,17 +214,8 @@ def main():
         loss_critic_type="smooth_l1",
     )
 
-    # Use separate optimizers for better control
-    optimizer_actor = optim.Adam(policy_module.parameters(), lr=LEARNING_RATE_ACTOR)
-    optimizer_critic = optim.Adam(value_module.parameters(), lr=LEARNING_RATE_CRITIC)
-    
-    # Add learning rate schedulers
-    # scheduler_actor = optim.lr_scheduler.CosineAnnealingLR(
-    #    optimizer_actor, T_max=1000, eta_min=1e-5
-    #)
-    #scheduler_critic = optim.lr_scheduler.CosineAnnealingLR(
-    #    optimizer_critic, T_max=1000, eta_min=1e-4
-    #)
+    # Single optimizer
+    optimizer = optim.Adam(impala_model.parameters(), lr=LEARNING_RATE)
     
     # For gradient clipping
     GRAD_CLIP_VALUE = 1.0
@@ -181,19 +228,28 @@ def main():
     videos_dir = f"videos/{run_name}"
     os.makedirs(videos_dir, exist_ok=True)
     
-    eval_str = ""
     pbar = tqdm(total=collector.total_frames) # Use collector's actual total frames
 
     for i, tensordict_data in enumerate(collector):
         # Set the networks to training mode
-        actor_net_core.train()
-        critic_net.train()
+        impala_model.train()
+
+        # Print the shape of the data
+        print(f"Before squeezing: {tensordict_data.shape}")
+
+        # Reset LSTM states for environments that terminated
+        if "done" in tensordict_data.keys():
+            done_envs = tensordict_data["done"].any(dim=1)  # Check if any step in trajectory is done
+            if done_envs.any():
+                done_indices = torch.where(done_envs)[0].cpu().numpy()
+                impala_wrapper.reset_states(done_indices)
 
         # Reshape the data to flatten environment and trajectory dimensions
         # From [num_envs, trajectory_length_per_env, ...] to [total_samples, ...]
         batch_size = tensordict_data.batch_size
         total_samples = batch_size[0] * batch_size[1]  # num_envs * trajectory_length_per_env
         tensordict_data_squeezed = tensordict_data.view(total_samples)
+        print(f"After squeezing: {tensordict_data_squeezed.shape}")
 
         # Calculate advantage once for the entire trajectory
         with torch.no_grad():
@@ -257,11 +313,9 @@ def main():
                 batch_losses_entropy.append(loss_vals["loss_entropy"].cpu().item())
 
                 loss_value.backward()
-                torch.nn.utils.clip_grad_norm_(ppo_loss.parameters(), GRAD_CLIP_VALUE)
-                optimizer_actor.step()
-                optimizer_critic.step()
-                optimizer_actor.zero_grad()
-                optimizer_critic.zero_grad()
+                torch.nn.utils.clip_grad_norm_(impala_model.parameters(), GRAD_CLIP_VALUE)
+                optimizer.step()
+                optimizer.zero_grad()
                 
                 # Clean up batch data immediately
                 del subdata, loss_vals, loss_value
@@ -286,19 +340,17 @@ def main():
             logger.log_scalar("train/loss_mean_entropy", np.mean(epoch_losses_entropy), step=i)
             logger.log_scalar("train/loss_std_entropy", np.std(epoch_losses_entropy), step=i)
 
-        # Step the learning rate schedulers
-        # scheduler_actor.step()
-        # scheduler_critic.step()
-
-        # Log learning rates
-        # logger.log_scalar("train/lr_actor", scheduler_actor.get_last_lr()[0], step=i)
-        # logger.log_scalar("train/lr_critic", scheduler_critic.get_last_lr()[0], step=i)
+        # Log learning rate
+        logger.log_scalar("train/lr", LEARNING_RATE, step=i)
 
         pbar.update(total_samples)
         
         if i % 5 == 0:
             
             with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
+                # Reset LSTM states for evaluation
+                impala_wrapper.reset_states()
+                
                 # execute a rollout with the trained policy
                 try:
                     eval_rollout = env.rollout(500, policy_module, break_when_any_done=False)

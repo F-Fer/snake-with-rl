@@ -1,164 +1,167 @@
-import numpy as np
 import torch
-import math
 import torch.nn as nn
-import gymnasium as gym
+import torch.nn.functional as F
 
-HID_SIZE = 256
+class ResidualBlock(nn.Module):
+    def __init__(self, num_channels):
+        super(ResidualBlock, self).__init__()
+        self.conv0 = nn.Conv2d(in_channels=num_channels, out_channels=num_channels, kernel_size=3, stride=1, padding=1)
+        self.conv1 = nn.Conv2d(in_channels=num_channels, out_channels=num_channels, kernel_size=3, stride=1, padding=1)
 
-
-def calculate_conv_output_size(input_size, kernel_size, stride, padding=0):
-    """Calculate output size after convolution"""
-    return (input_size + 2 * padding - kernel_size) // stride + 1
-
-
-class ResBlock(nn.Module):
-    def __init__(self, in_channels):
-        super(ResBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=3, stride=1, padding=1)
-        self.relu = nn.ReLU()
-
-    def forward(self, x_in):
-        x = self.relu(x_in)
-        x = self.relu(self.conv1(x))
-        x_out = self.conv2(x)
-        return x_in + x_out
-
-
-class ConvBlock(nn.Module):
-    def __init__(self, in_channels, block_channels):
-        super(ConvBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=block_channels, kernel_size=3, stride=1, padding=1)
-        self.max_pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.res1 = ResBlock(block_channels)
-        self.res2 = ResBlock(block_channels)
-
-    def forward(self, x_in):
-        x = self.conv1(x_in)
-        x = self.max_pool(x)
-        x = self.res1(x)
-        return self.res2(x)
-    
-
-class ConvNet(nn.Module):
-    def __init__(self, in_channels, base_channels=16):
-        super(ConvNet, self).__init__()
-        self.conv1 = ConvBlock(in_channels=in_channels, block_channels=base_channels)
-        self.conv2 = ConvBlock(in_channels=base_channels, block_channels=base_channels * 2)
-        self.conv3 = ConvBlock(in_channels=base_channels * 2, block_channels=base_channels * 2)
-        self.flatten = nn.Flatten()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
+        inputs = x
+        x = F.relu(x)
+        x = self.conv0(x)
+        x = F.relu(x)
         x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.flatten(x)
+        return x + inputs
+
+class ImpalaCNN(nn.Module):
+    def __init__(self, in_channels, feature_dim=256, height=84, width=84):
+        super(ImpalaCNN, self).__init__()
+        self.feature_dim = feature_dim
+        self.blocks = []
+        self.channels_configs = [16, 32, 32] # Number of channels for each block stack
+
+        current_channels = in_channels
+        for i, num_channels in enumerate(self.channels_configs):
+            layers = []
+            layers.append(nn.Conv2d(in_channels=current_channels, out_channels=num_channels, kernel_size=3, stride=1, padding=1))
+            layers.append(nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
+            layers.append(ResidualBlock(num_channels))
+            layers.append(ResidualBlock(num_channels))
+            self.blocks.append(nn.Sequential(*layers))
+            current_channels = num_channels
+
+        self.final_convs = nn.ModuleList(self.blocks)
+        self.flattened_size = self._calculate_flattened_size(height, width)
+
+        self.fc = nn.Linear(self.flattened_size, feature_dim)
+
+    def forward(self, x):
+        # Input x shape: (batch_size * sequence_length, channels, height, width)
+        for block_stack in self.final_convs:
+            x = block_stack(x)
+        x = F.relu(x)
+        x = x.view(x.size(0), -1) # Flatten
+        if x.size(1) != self.flattened_size:
+            raise ValueError(f"Expected flattened size {self.flattened_size}, but got {x.size(1)}. "
+                             f"Please adjust 'flattened_size' in ImpalaCNN based on your input dimensions "
+                             f"and CNN architecture. Input shape to CNN was {list(x.shape)} before flatten.")
+        x = self.fc(x)
+        x = F.relu(x)
         return x
     
-    
-class ModelResidual(nn.Module):
-    def __init__(self, channels_in: int, num_outputs: int, hidden_size=HID_SIZE, base_channels=16):
-        super(ModelResidual, self).__init__()
-        self.conv_net = ConvNet(in_channels=channels_in, base_channels=base_channels)
-        self.linear = nn.LazyLinear(hidden_size)
-        self.relu = nn.ReLU()
-        self.linear2 = nn.Linear(hidden_size, num_outputs)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Convert uint8 to float32 and normalize to [0, 1] range
+    def _calculate_flattened_size(self, height, width):
+        """
+        Calculate the flattened size of the output of the CNN.
+        """
+        for _ in range(len(self.channels_configs)):
+            height = (height - 3 + 2*1) // 2 + 1
+            width = (width - 3 + 2*1) // 2 + 1
+        return self.channels_configs[-1] * height * width
+
+class ImpalaModel(nn.Module):
+    def __init__(self, in_channels, num_actions, feature_dim=256, lstm_hidden_size=256, height=84, width=84, device=None):
+        super(ImpalaModel, self).__init__()
+        self.num_actions = num_actions
+        self.feature_dim = feature_dim
+        self.lstm_hidden_size = lstm_hidden_size
+        self.device = device
+        self.cnn = ImpalaCNN(in_channels=in_channels, feature_dim=feature_dim, height=height, width=width).to(device)
+        self.lstm = nn.LSTMCell(input_size=feature_dim, hidden_size=lstm_hidden_size).to(device)
+
+        # Actor (policy) head
+        self.policy_head = nn.Linear(lstm_hidden_size, num_actions).to(device)
+        # Critic (value) head
+        self.value_head = nn.Linear(lstm_hidden_size, 1).to(device)
+
+    def initial_state(self, batch_size):
+        # Hidden state and cell state for LSTM
+        return (torch.zeros(batch_size, self.lstm_hidden_size, device=self.device),
+                torch.zeros(batch_size, self.lstm_hidden_size, device=self.device))
+
+    def forward(self, x, core_state):
+        # x shape: (sequence_length, batch_size, channels, height, width)
+        # core_state: tuple (hidden_state, cell_state) from LSTM
+
         if x.dtype == torch.uint8:
             x = x.float() / 255.0
-        
-        x = self.relu(self.conv_net(x))
-        x = self.relu(self.linear(x))
-        x = self.linear2(x)
-        return x
-        
 
-class ModelActor(nn.Module):
-    def __init__(self, obs_shape: tuple, act_size: int):
-        super(ModelActor, self).__init__()
-        
-        # Calculate the size after convolutions
-        # Input: (C, H, W) = (1, 84, 84) for grayscale
-        c, h, w = obs_shape
-        
-        # First conv: kernel=8, stride=4
-        h1 = calculate_conv_output_size(h, 8, 4)
-        w1 = calculate_conv_output_size(w, 8, 4)
-        
-        # Second conv: kernel=4, stride=2  
-        h2 = calculate_conv_output_size(h1, 4, 2)
-        w2 = calculate_conv_output_size(w1, 4, 2)
-        
-        # Third conv: kernel=3, stride=1
-        h3 = calculate_conv_output_size(h2, 3, 1)
-        w3 = calculate_conv_output_size(w2, 3, 1)
-        
-        # Final feature size: 64 channels * h3 * w3
-        conv_output_size = 64 * h3 * w3
+        T, B, C, H, W = x.shape
+        x = x.view(T * B, C, H, W) # Combine sequence and batch for CNN
 
-        self.net = nn.Sequential(
-            nn.Conv2d(obs_shape[0], 32, kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(conv_output_size, HID_SIZE),
-            nn.Tanh(),
-            nn.Linear(HID_SIZE, 2 * act_size),
-        )
+        x = self.cnn(x) # (T*B, feature_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Convert uint8 to float32 and normalize to [0, 1] range
-        if x.dtype == torch.uint8:
-            x = x.float() / 255.0
-            
-        return self.net(x)
+        # LSTM processing
+        # x needs to be (sequence_length, batch_size, feature_dim) for LSTM
+        x = x.view(T, B, self.feature_dim)
+        hx, cx = core_state
+        output_hiddens = []
+        for t in range(T):
+            hx, cx = self.lstm(x[t], (hx, cx))
+            output_hiddens.append(hx)
 
+        # Stack hidden states from each time step
+        lstm_out = torch.stack(output_hiddens, dim=0) # (T, B, lstm_hidden_size)
 
-class ModelCritic(nn.Module):
-    def __init__(self, obs_shape: tuple):
-        super(ModelCritic, self).__init__()
-        
-        # Calculate the size after convolutions
-        # Input: (C, H, W) = (1, 84, 84) for grayscale
-        c, h, w = obs_shape
-        
-        # First conv: kernel=8, stride=4
-        h1 = calculate_conv_output_size(h, 8, 4)
-        w1 = calculate_conv_output_size(w, 8, 4)
-        
-        # Second conv: kernel=4, stride=2  
-        h2 = calculate_conv_output_size(h1, 4, 2)
-        w2 = calculate_conv_output_size(w1, 4, 2)
-        
-        # Third conv: kernel=3, stride=1
-        h3 = calculate_conv_output_size(h2, 3, 1)
-        w3 = calculate_conv_output_size(w2, 3, 1)
-        
-        # Final feature size: 64 channels * h3 * w3
-        conv_output_size = 64 * h3 * w3
+        # Policy logits
+        logits = self.policy_head(lstm_out) # (T, B, num_actions)
 
-        self.net = nn.Sequential(
-            nn.Conv2d(obs_shape[0], 32, kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(conv_output_size, HID_SIZE),
-            nn.Tanh(),
-            nn.Linear(HID_SIZE, 1),
-        )
+        # Value function
+        value = self.value_head(lstm_out) # (T, B, 1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Convert uint8 to float32 and normalize to [0, 1] range
-        if x.dtype == torch.uint8:
-            x = x.float() / 255.0
-            
-        return self.net(x)
+        # Reshape to (T*B, ...) for loss calculation if needed by your trainer
+        # Or keep as (T, B, ...) if your trainer handles sequences
+        # Here we return per-step outputs and final core_state
+        return logits, value, (hx, cx)
+
+# Example Usage (assuming Atari-like environment)
+if __name__ == '__main__':
+    # N_CHANNELS: Number of input channels (e.g., 1 for grayscale, 3 for RGB, 4 for stacked frames)
+    # Typically, IMPALA uses stacked frames, e.g., 4 grayscale frames.
+    # However, the in_channels to the CNN itself would be the number of channels in one observation *after* stacking.
+    # For example, if you stack 4 grayscale (1 channel) frames, in_channels to CNN is 4.
+    # If you stack 4 RGB (3 channels) frames, then in_channels to CNN is 12.
+    # Let's assume stacked grayscale frames.
+    N_CHANNELS = 4
+    NUM_ACTIONS = 6  # Example for an Atari game
+    IMG_HEIGHT = 84 # Example, adjust to your environment
+    IMG_WIDTH = 84  # Example, adjust to your environment
+
+    # Create model instance
+    model = ImpalaModel(in_channels=N_CHANNELS, num_actions=NUM_ACTIONS, height=IMG_HEIGHT, width=IMG_WIDTH)
+    print("Model created successfully.")
+    print(model)
+
+    # Dummy input
+    sequence_length = 5
+    batch_size = 2
+    dummy_input = torch.randn(sequence_length, batch_size, N_CHANNELS, IMG_HEIGHT, IMG_WIDTH)
+    initial_core_state = model.initial_state(batch_size)
+
+    # Move model and data to device if using GPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    dummy_input = dummy_input.to(device)
+    initial_core_state = (initial_core_state[0].to(device), initial_core_state[1].to(device))
+
+    # Forward pass
+    try:
+        logits, value, next_core_state = model(dummy_input, initial_core_state)
+        print("\nForward pass successful!")
+        print("Logits shape:", logits.shape)  # Expected: (sequence_length, batch_size, num_actions)
+        print("Value shape:", value.shape)    # Expected: (sequence_length, batch_size, 1)
+        print("Next hidden state shape:", next_core_state[0].shape) # Expected: (batch_size, lstm_hidden_size)
+        print("Next cell state shape:", next_core_state[1].shape)   # Expected: (batch_size, lstm_hidden_size)
+
+        # Check actor-learner output shapes if unbatched (sequence combined with batch)
+        # T_B_logits = logits.reshape(-1, NUM_ACTIONS)
+        # T_B_value = value.reshape(-1, 1)
+        # print("Reshaped Logits shape (T*B, num_actions):", T_B_logits.shape)
+        # print("Reshaped Value shape (T*B, 1):", T_B_value.shape)
+
+    except ValueError as e:
+        print(f"\nError during forward pass: {e}")
+        print("This often happens if 'flattened_size' in ImpalaCNN is not calculated correctly "
+              "for your specific input image dimensions and CNN architecture.")
