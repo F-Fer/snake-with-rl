@@ -81,39 +81,21 @@ class ImpalaModel(nn.Module):
         return (torch.zeros(batch_size, self.lstm_hidden_size, device=self.device),
                 torch.zeros(batch_size, self.lstm_hidden_size, device=self.device))
 
-    def forward(self, x, core_state):
-        # x shape: (sequence_length, batch_size, channels, height, width)
-        # core_state: tuple (hidden_state, cell_state) from LSTM
-
+    def forward(self, x: torch.Tensor,
+                core_state: tuple[torch.Tensor, torch.Tensor]):
+        """
+        x          : (B, C, H, W) - one time-step for every env
+        core_state : (hx, cx) where each is (B, lstm_hidden)
+        """
         if x.dtype == torch.uint8:
             x = x.float() / 255.0
 
-        T, B, C, H, W = x.shape
-        x = x.view(T * B, C, H, W) # Combine sequence and batch for CNN
+        x = self.cnn(x)                         # (B, feature_dim)
+        hx, cx = self.lstm(x, core_state)       # LSTMCell -> (B, hidden)
 
-        x = self.cnn(x) # (T*B, feature_dim)
+        logits = self.policy_head(hx)           # (B, num_actions)
+        value  = self.value_head(hx).squeeze(-1)  # (B,)
 
-        # LSTM processing
-        # x needs to be (sequence_length, batch_size, feature_dim) for LSTM
-        x = x.view(T, B, self.feature_dim)
-        hx, cx = core_state
-        output_hiddens = []
-        for t in range(T):
-            hx, cx = self.lstm(x[t], (hx, cx))
-            output_hiddens.append(hx)
-
-        # Stack hidden states from each time step
-        lstm_out = torch.stack(output_hiddens, dim=0) # (T, B, lstm_hidden_size)
-
-        # Policy logits
-        logits = self.policy_head(lstm_out) # (T, B, num_actions)
-
-        # Value function
-        value = self.value_head(lstm_out) # (T, B, 1)
-
-        # Reshape to (T*B, ...) for loss calculation if needed by your trainer
-        # Or keep as (T, B, ...) if your trainer handles sequences
-        # Here we return per-step outputs and final core_state
         return logits, value, (hx, cx)
 
 # Example Usage (assuming Atari-like environment)

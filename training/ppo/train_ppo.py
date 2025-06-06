@@ -11,12 +11,14 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 from tqdm import tqdm
 import torch
 from torch import nn
+import torch.nn.functional as F
 import typing as tt
 from training.lib.model import ImpalaModel
 import multiprocessing
 from snake_env.envs.snake_env import SnakeEnv
 from torchrl.envs.libs.gym import GymWrapper
 from torchrl.envs.transforms import ToTensorImage, TransformedEnv, Resize, FrameSkipTransform, GrayScale, CatFrames
+from tensordict import TensorDict
 from tensordict.nn import TensorDictModule
 from tensordict.nn.distributions import NormalParamExtractor
 import torch.optim as optim
@@ -35,7 +37,6 @@ from datetime import datetime
 import imageio
 import numpy as np
 
-
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 
@@ -47,6 +48,7 @@ PPO_EPOCHS = 8
 PPO_BATCH_SIZE = 256
 NUM_ENVS = 16
 SEQUENCE_LENGTH = 32  # Length of sequences for LSTM
+TOTAL_FRAMES = 1_000_000
 
 is_fork = multiprocessing.get_start_method() == "fork"
 device = (
@@ -58,64 +60,159 @@ device = (
 print(f"Using device: {device}")
 
 
-class ImpalaWrapper(nn.Module):
-    """Wrapper to make IMPALA model compatible with TorchRL's expected interface"""
+class ImpalaBackbone(nn.Module):
+    """
+    Stateful wrapper that manages LSTM state internally
+    """
     def __init__(self, impala_model, num_envs):
         super().__init__()
-        self.impala_model = impala_model
+        self.impala = impala_model
         self.num_envs = num_envs
-        # Initialize hidden states for all environments
-        self.hidden_states = self.impala_model.initial_state(num_envs)
-        
-    def forward(self, obs):
-        # obs shape: (batch_size, channels, height, width)
-        # Need to add sequence dimension: (1, batch_size, channels, height, width)
-        obs_with_seq = obs.unsqueeze(0)
-        
-        # Forward pass through IMPALA
-        logits, values, self.hidden_states = self.impala_model(obs_with_seq, self.hidden_states)
-        
-        # Remove sequence dimension: (batch_size, num_actions), (batch_size, 1)
-        logits = logits.squeeze(0)
-        values = values.squeeze(0)
-        
-        return logits, values
-    
-    def reset_states(self, env_indices=None):
-        """Reset hidden states for specified environments (or all if None)"""
-        if env_indices is None:
-            self.hidden_states = self.impala_model.initial_state(self.num_envs)
-        else:
-            # Reset specific environments
-            initial_states = self.impala_model.initial_state(len(env_indices))
-            for i, env_idx in enumerate(env_indices):
-                self.hidden_states[0][env_idx] = initial_states[0][i]
-                self.hidden_states[1][env_idx] = initial_states[1][i]
+        self.reset_states()
 
+    def reset_states(self):
+        """Reset LSTM states for all environments"""
+        self.lstm_state = self.impala.initial_state(self.num_envs)
 
-class PolicyModule(nn.Module):
-    """Policy module that extracts action parameters from IMPALA model"""
-    def __init__(self, impala_wrapper):
-        super().__init__()
-        self.impala_wrapper = impala_wrapper
+    def forward(self, pixels):
+        # pixels: (B,C,H,W)
+        obs = pixels
         
-    def forward(self, obs):
-        logits, _ = self.impala_wrapper(obs)
-        # Split logits into loc and scale for continuous actions
+        logits, val, next_state = self.impala(obs, self.lstm_state)
+        
+        # Update internal state
+        self.lstm_state = next_state
+
         loc, scale = torch.chunk(logits, 2, dim=-1)
-        scale = torch.nn.functional.softplus(scale) + 1e-4  # Ensure positive scale
-        return {"loc": loc, "scale": scale}
-
-
-class ValueModule(nn.Module):
-    """Value module that extracts value from IMPALA model"""
-    def __init__(self, impala_wrapper):
-        super().__init__()
-        self.impala_wrapper = impala_wrapper
         
-    def forward(self, obs):
-        _, values = self.impala_wrapper(obs)
-        return {"state_value": values.squeeze(-1)}
+        return {
+            "loc":  loc,
+            "scale": F.softplus(scale) + 1e-4,          # keep >0
+            "state_value": val,
+        }
+        
+    def reset_lstm_for_done_envs(self, done_mask):
+        """Reset LSTM state for environments that are done"""
+        if isinstance(self.lstm_state, tuple):
+            hx, cx = self.lstm_state
+            done_mask = done_mask.to(hx.device).float()
+            
+            # done_mask might be [batch_size] or [batch_size, 1]
+            # hx/cx shape: [batch_size, hidden_size]
+            if done_mask.dim() == 1:
+                done_mask = done_mask.unsqueeze(1)  # [batch_size, 1]
+            elif done_mask.dim() == 2 and done_mask.size(1) != 1:
+                done_mask = done_mask.squeeze()  # Remove extra dimensions
+                if done_mask.dim() == 1:
+                    done_mask = done_mask.unsqueeze(1)
+                    
+            hx = hx * (1 - done_mask)
+            cx = cx * (1 - done_mask)
+            self.lstm_state = (hx, cx)
+
+
+class StatelessImpalaBackbone(nn.Module):
+    """
+    Stateless wrapper for training - initializes fresh LSTM state for each batch
+    """
+    def __init__(self, impala_model):
+        super().__init__()
+        self.impala = impala_model
+
+    def forward(self, pixels):
+        # pixels: (B,C,H,W)
+        obs = pixels
+        batch_size = obs.size(0)
+        
+        # Initialize fresh LSTM state for this batch
+        lstm_state = self.impala.initial_state(batch_size)
+        
+        logits, val, next_state = self.impala(obs, lstm_state)
+
+        loc, scale = torch.chunk(logits, 2, dim=-1)
+        
+        return {
+            "loc":  loc,
+            "scale": F.softplus(scale) + 1e-4,          # keep >0
+            "state_value": val,
+        }
+    
+
+def collect_rollout(env, policy, traj_len_per_env, backbone):
+    """
+    Returns:
+        rollout     - TensorDict  [num_envs, traj_len, ...]
+    """
+    steps = []
+    
+    # Get initial observation
+    obs = env.reset()
+    
+    for step_idx in range(traj_len_per_env):
+        # Create input tensordict with current observation
+        current_pixels = obs["pixels"]
+        # Ensure pixels are on CPU before TensorDict conversion,
+        # letting TensorDict handle the move to the target device.
+        pixels_on_cpu = current_pixels.cpu()
+
+        td_in = TensorDict(
+            {"pixels": pixels_on_cpu},
+            batch_size=[NUM_ENVS],
+            device=device,
+        )
+        
+        with torch.no_grad():
+            td_out = policy(td_in)
+
+        action = td_out["action"]
+
+        # Step the environment
+        next_obs = env.step(td_out)
+        
+        # Extract rewards and dones from the stepped environment
+        reward = next_obs["next", "reward"]
+        done = next_obs["next", "done"]
+        
+        # Reset LSTM state for done episodes
+        backbone.reset_lstm_for_done_envs(done)
+
+        # Get next state value for GAE calculation
+        next_pixels_cpu = next_obs["next", "pixels"].cpu()
+        next_td_in = TensorDict(
+            {"pixels": next_pixels_cpu},
+            batch_size=[NUM_ENVS],
+            device=device,
+        )
+        
+        with torch.no_grad():
+            next_td_out = policy(next_td_in)
+        
+        # Store the step data
+        step_data = TensorDict({
+            "pixels": obs["pixels"].to(device),
+            "action": action,
+            "reward": reward.squeeze(-1).to(device),  # Remove extra dimension
+            "done": done.squeeze(-1).to(device),      # Remove extra dimension
+            "next": {
+                "pixels": next_obs["next", "pixels"].to(device),
+                "reward": reward.squeeze(-1).to(device),  # Remove extra dimension
+                "done": done.squeeze(-1).to(device),      # Remove extra dimension
+                "state_value": next_td_out["state_value"],
+            },
+            "loc": td_out["loc"],
+            "scale": td_out["scale"],
+            "sample_log_prob": td_out["sample_log_prob"],
+            "state_value": td_out["state_value"],
+        }, batch_size=[NUM_ENVS])
+        
+        steps.append(step_data)
+        
+        # Update current observation for next step
+        obs = next_obs["next"]
+
+    rollout = torch.stack(steps, dim=1)  # [NUM_ENVS, traj_len_per_env, ...]
+    print(rollout.shape)
+    return rollout
 
 
 def main():
@@ -149,48 +246,58 @@ def main():
         device=device
     ).to(device)
     
-    # Wrap the IMPALA model
-    impala_wrapper = ImpalaWrapper(impala_model, NUM_ENVS)
+    # Stateful backbone for data collection
+    backbone = ImpalaBackbone(impala_model, NUM_ENVS).to(device)
     
-    # Create policy and value modules
-    policy_net = PolicyModule(impala_wrapper)
-    value_net = ValueModule(impala_wrapper)
+    # Stateless backbone for training
+    stateless_backbone = StatelessImpalaBackbone(impala_model).to(device)
 
-    # This module will process "pixels" and output "loc" and "scale"
-    policy_params_module = TensorDictModule(
-        module=policy_net,
-        in_keys=["pixels"], 
-        out_keys=["loc", "scale"]
+    # Collection policy (stateful)
+    actor_core = TensorDictModule(
+        backbone,
+        in_keys=["pixels"],
+        out_keys=["loc", "scale", "state_value"],
     )
 
-    # ProbabilisticActor samples an action from "loc" and "scale" and outputs "action"
     policy_module = ProbabilisticActor(
-        module=policy_params_module,
+        module=actor_core,
         spec=env.action_spec,
         in_keys=["loc", "scale"],
         out_keys=["action"],
         distribution_class=TanhNormal,
         distribution_kwargs={
-            "low": env.action_spec.space.low,
+            "low":  env.action_spec.space.low,
+            "high": env.action_spec.space.high,
+        },
+        return_log_prob=True,
+    ).to(device)
+    
+    # Training policy (stateless)
+    training_actor_core = TensorDictModule(
+        stateless_backbone,
+        in_keys=["pixels"],
+        out_keys=["loc", "scale", "state_value"],
+    )
+
+    training_policy_module = ProbabilisticActor(
+        module=training_actor_core,
+        spec=env.action_spec,
+        in_keys=["loc", "scale"],
+        out_keys=["action"],
+        distribution_class=TanhNormal,
+        distribution_kwargs={
+            "low":  env.action_spec.space.low,
             "high": env.action_spec.space.high,
         },
         return_log_prob=True,
     ).to(device)
 
+    # critic just re-uses the value inserted by backbone
     value_module = TensorDictModule(
-        value_net,
-        in_keys=["pixels"],
-        out_keys=["state_value"]
-    )
-
-    collector = SyncDataCollector(
-        env,
-        policy_module,
-        frames_per_batch=TRAJECTORY_SIZE,
-        total_frames=1_000_000,
-        split_trajs=False,
-        device=device
-    )
+        lambda td: td,              # identity – value already present
+        in_keys=["state_value"],
+        out_keys=["state_value"],
+    ).to(device)
 
     replay_buffer = ReplayBuffer(
         storage=LazyTensorStorage(max_size=TRAJECTORY_SIZE),
@@ -207,7 +314,7 @@ def main():
     )
 
     ppo_loss = ClipPPOLoss(
-        actor_network=policy_module,
+        actor_network=training_policy_module,
         critic_network=value_module,
         clip_epsilon=PPO_EPS,
         critic_coef=1.0,
@@ -228,132 +335,79 @@ def main():
     videos_dir = f"videos/{run_name}"
     os.makedirs(videos_dir, exist_ok=True)
     
-    pbar = tqdm(total=collector.total_frames) # Use collector's actual total frames
+    pbar = tqdm(total=TOTAL_FRAMES) # Use collector's actual total frames
 
-    for i, tensordict_data in enumerate(collector):
-        # Set the networks to training mode
-        impala_model.train()
-
-        # Print the shape of the data
-        print(f"Before squeezing: {tensordict_data.shape}")
-
-        # Reset LSTM states for environments that terminated
-        if "done" in tensordict_data.keys():
-            done_envs = tensordict_data["done"].any(dim=1)  # Check if any step in trajectory is done
-            if done_envs.any():
-                done_indices = torch.where(done_envs)[0].cpu().numpy()
-                impala_wrapper.reset_states(done_indices)
-
-        # Reshape the data to flatten environment and trajectory dimensions
-        # From [num_envs, trajectory_length_per_env, ...] to [total_samples, ...]
-        batch_size = tensordict_data.batch_size
-        total_samples = batch_size[0] * batch_size[1]  # num_envs * trajectory_length_per_env
-        tensordict_data_squeezed = tensordict_data.view(total_samples)
-        print(f"After squeezing: {tensordict_data_squeezed.shape}")
-
-        # Calculate advantage once for the entire trajectory
-        with torch.no_grad():
-            # Process advantage calculation in chunks to avoid memory issues
-            chunk_size = 1024
-            num_chunks = (total_samples + chunk_size - 1) // chunk_size
-            
-            for chunk_idx in range(num_chunks):
-                start_idx = chunk_idx * chunk_size
-                end_idx = min(start_idx + chunk_size, total_samples)
-                
-                chunk_data = tensordict_data_squeezed[start_idx:end_idx]
-                advantage_module(chunk_data)
-                
-                # Copy the computed values back to the original tensor
-                if chunk_idx == 0:
-                    # Initialize the full tensors on first chunk
-                    full_advantage = chunk_data["advantage"].clone()
-                    full_value_target = chunk_data["value_target"].clone()
-                else:
-                    # Concatenate subsequent chunks
-                    full_advantage = torch.cat([full_advantage, chunk_data["advantage"]], dim=0)
-                    full_value_target = torch.cat([full_value_target, chunk_data["value_target"]], dim=0)
-                
-                # Clear chunk data to free memory
-                del chunk_data
-            
-            # Set the computed values back to the original tensor
-            tensordict_data_squeezed["advantage"] = full_advantage
-            tensordict_data_squeezed["value_target"] = full_value_target
-            # tensordict_data_squeezed now contains "advantage" and "value_target"
-
-        # Normalize advantages
-        advantages = tensordict_data_squeezed["advantage"]
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        tensordict_data_squeezed["advantage"] = advantages
+    frames_done = 0
+    i = 0
+    while frames_done < TOTAL_FRAMES:
+        # Collect rollout
+        rollout = collect_rollout(
+            env, policy_module, traj_len_per_env=SEQUENCE_LENGTH, backbone=backbone)
         
+        frames_done += NUM_ENVS * SEQUENCE_LENGTH
+
+        # Calculate advantage on the un-flattened rollout
+        advantage_module(rollout)
+
+        # Normalize advantage
+        rollout["advantage"] = (
+            (rollout["advantage"] - rollout["advantage"].mean())
+            / (rollout["advantage"].std() + 1e-8)
+        )
+
+        # Flatten the rollout and add to replay buffer
+        flat = rollout.reshape(-1)
+        replay_buffer.empty()
+        replay_buffer.extend(flat.cpu())
+
         # PPO update loop: multiple epochs over the collected trajectory
-        epoch_losses_actor = []
-        epoch_losses_critic = []
-        epoch_losses_entropy = []
-        for _epoch_idx in range(PPO_EPOCHS):
-            replay_buffer.empty() # Clear buffer before filling with new trajectory data for this epoch set
-            replay_buffer.extend(tensordict_data_squeezed.cpu()) # Add all data from the current trajectory
-
-            batch_losses_actor = []
-            batch_losses_critic = []
-            batch_losses_entropy = []
-            for _batch_idx in range(total_samples // PPO_BATCH_SIZE):
-                subdata = replay_buffer.sample(PPO_BATCH_SIZE)
-                
-                loss_vals = ppo_loss(subdata.to(device))
-                loss_value = (
-                    loss_vals["loss_objective"]
-                    + loss_vals["loss_critic"]
-                    + loss_vals["loss_entropy"]
-                )
-                
-                batch_losses_actor.append(loss_vals["loss_objective"].cpu().item())
-                batch_losses_critic.append(loss_vals["loss_critic"].cpu().item())
-                batch_losses_entropy.append(loss_vals["loss_entropy"].cpu().item())
-
-                loss_value.backward()
-                torch.nn.utils.clip_grad_norm_(impala_model.parameters(), GRAD_CLIP_VALUE)
+        impala_model.train()
+        
+        loss_total = []
+        loss_policy = []
+        loss_value = []
+        loss_entropy = []
+        for _ in range(PPO_EPOCHS):
+            for _ in range(len(flat) // PPO_BATCH_SIZE):
+                sub = replay_buffer.sample(PPO_BATCH_SIZE).to(device)
+                loss_dict = ppo_loss(sub)
+                loss = (loss_dict["loss_objective"]
+                        + loss_dict["loss_critic"]
+                        + loss_dict["loss_entropy"])
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(impala_model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
-                
-                # Clean up batch data immediately
-                del subdata, loss_vals, loss_value
-                
-            
-            epoch_losses_actor.extend(batch_losses_actor)
-            epoch_losses_critic.extend(batch_losses_critic)
-            epoch_losses_entropy.extend(batch_losses_entropy)
+
+                loss_total.append(loss.item())
+                loss_policy.append(loss_dict["loss_objective"].item())
+                loss_value.append(loss_dict["loss_critic"].item())
+                loss_entropy.append(loss_dict["loss_entropy"].item())
 
         # Log metrics to TensorBoard
-        logger.log_scalar("train/reward_mean", tensordict_data_squeezed["next", "reward"].mean().item(), step=i)
-        logger.log_scalar("train/reward_sum", tensordict_data_squeezed["next", "reward"].sum().item(), step=i)
-        
-        # Log training loss
-        if epoch_losses_actor:
-            logger.log_scalar("train/loss_mean_actor", np.mean(epoch_losses_actor), step=i)
-            logger.log_scalar("train/loss_std_actor", np.std(epoch_losses_actor), step=i)
-        if epoch_losses_critic:
-            logger.log_scalar("train/loss_mean_critic", np.mean(epoch_losses_critic), step=i)
-            logger.log_scalar("train/loss_std_critic", np.std(epoch_losses_critic), step=i)
-        if epoch_losses_entropy:
-            logger.log_scalar("train/loss_mean_entropy", np.mean(epoch_losses_entropy), step=i)
-            logger.log_scalar("train/loss_std_entropy", np.std(epoch_losses_entropy), step=i)
+        logger.log_scalar("train/loss_total", np.mean(loss_total), step=frames_done)
+        logger.log_scalar("train/loss_policy", np.mean(loss_policy), step=frames_done)
+        logger.log_scalar("train/loss_value", np.mean(loss_value), step=frames_done)
+        logger.log_scalar("train/loss_entropy", np.mean(loss_entropy), step=frames_done)
+            
+        pbar.update(frames_done)
 
-        # Log learning rate
-        logger.log_scalar("train/lr", LEARNING_RATE, step=i)
-
-        pbar.update(total_samples)
-        
         if i % 5 == 0:
             
             with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
                 # Reset LSTM states for evaluation
-                impala_wrapper.reset_states()
+                backbone.reset_states()
                 
                 # execute a rollout with the trained policy
                 try:
-                    eval_rollout = env.rollout(500, policy_module, break_when_any_done=False)
+                    # Simple approach: just use our manual rollout collection for evaluation
+                    # Reset states and collect a shorter evaluation rollout
+                    backbone.reset_states()
+                    eval_length = min(500, SEQUENCE_LENGTH * 5)  # Shorter evaluation
+                    eval_rollout_dict = collect_rollout(env, policy_module, eval_length, backbone)
+                    
+                    # Convert to format expected by rest of code
+                    eval_rollout = eval_rollout_dict
 
                     # Move to CPU immediately to avoid CUDA memory issues
                     eval_reward_mean = eval_rollout["next", "reward"].cpu().mean().item()
@@ -409,8 +463,8 @@ def main():
                     
                 except Exception as e:
                     print(f"Evaluation failed: {e}")
-
-    collector.shutdown() # Ensure collector resources are released
+                    # Skip evaluation logging for this iteration
+        i += 1
     pbar.close()
 
 if __name__ == "__main__":
