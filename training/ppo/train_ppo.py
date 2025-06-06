@@ -41,13 +41,13 @@ GAMMA = 0.99
 GAE_LAMBDA = 0.95
 
 TRAJECTORY_SIZE = 16_384
-LEARNING_RATE = 3e-4
+LEARNING_RATE = 3e-5
 
 PPO_EPS = 0.2
 PPO_EPOCHS = 8
 PPO_BATCH_SIZE = 256
 NUM_ENVS = 16
-SEQUENCE_LENGTH = 32  # Length of sequences for LSTM
+SEQUENCE_LENGTH = 512  # Length of sequences for LSTM
 TOTAL_FRAMES = 1_000_000
 NUM_MINIBATCHES = 4
 MINIBATCH_SIZE = NUM_ENVS // NUM_MINIBATCHES
@@ -91,8 +91,6 @@ class ImpalaBackbone(nn.Module):
             batch_size = pixels_seq.shape[0]
             lstm_state = self.impala.initial_state(batch_size)
         
-        print(f"pixels_seq.shape: {pixels_seq.shape}")
-        print(f"lstm_state: {lstm_state[0].shape}")
         logits, val, next_state = self.impala(pixels_seq, lstm_state)
 
         # Update internal state only during stateful rollout
@@ -170,6 +168,8 @@ def collect_rollout(env, policy, traj_len_per_env, backbone):
         
         with torch.no_grad():
             next_td_out = policy(next_td_in)
+
+        hx, cx = backbone.lstm_state
         
         # Store the step data
         step_data = TensorDict({
@@ -187,7 +187,11 @@ def collect_rollout(env, policy, traj_len_per_env, backbone):
             "scale": td_out["scale"],
             "sample_log_prob": td_out["sample_log_prob"],
             "state_value": td_out["state_value"],
+            "hx_before": hx.squeeze(0).cpu(),
+            "cx_before": cx.squeeze(0).cpu(),
         }, batch_size=[NUM_ENVS])
+
+        print(f"step_data: {step_data}")
         
         steps.append(step_data)
         
@@ -302,7 +306,6 @@ def main():
         frames_done += NUM_ENVS * SEQUENCE_LENGTH
 
         # Calculate advantage on the un-flattened rollout
-        print("Calculating advantage")
         advantage_module(rollout)
 
         # Normalize advantage
@@ -314,10 +317,14 @@ def main():
         # Add a trailing unit dimension to advantage so PPO treats env and time dims correctly
         rollout["advantage"] = rollout["advantage"].unsqueeze(-1)
 
-        print(f"rollout shape: {rollout.shape}")
+        # Log the rollout
+        logger.log_scalar("train/advantage_mean", rollout["advantage"].mean(), step=frames_done)
+        logger.log_scalar("train/value_mean", rollout["state_value"].mean(), step=frames_done)
+        logger.log_scalar("train/reward_mean", rollout["reward"].mean(), step=frames_done)
+        logger.log_scalar("train/reward_sum", rollout["reward"].sum(), step=frames_done)
+
         # PPO update loop: multiple epochs over the collected trajectory
         impala_model.train()
-        
         loss_total = []
         loss_policy = []
         loss_value = []
@@ -326,6 +333,7 @@ def main():
             # Randomly permute env dimension and iterate minibatches
             perm = torch.randperm(NUM_ENVS)
             for start in range(0, NUM_ENVS, MINIBATCH_SIZE):
+                # backbone.reset_states()
                 idx = perm[start:start+MINIBATCH_SIZE]
                 sub_batch = rollout[idx].to(device)
                 loss_dict = ppo_loss(sub_batch)
@@ -381,8 +389,6 @@ def main():
                             # Extract pixel frames from rollout
                             # Shape should be [NUM_ENVS, sequence_length, channels, height, width]
                             pixel_frames = eval_rollout["pixels"].cpu().numpy()
-
-                            print(pixel_frames.shape)
                             
                             # Take only the first environment's frames: [sequence_length, channels, height, width]
                             if pixel_frames.ndim == 5:
@@ -397,7 +403,6 @@ def main():
                             
                             # Convert to proper format for video saving
                             if pixel_frames.dtype == np.uint8:
-                                print("uint8")
                                 # Data is already in 0-255 range as uint8, just ensure it's the right type
                                 pixel_frames = pixel_frames.astype(np.uint8)
                             elif pixel_frames.max() <= 1.0:
