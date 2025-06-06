@@ -190,8 +190,6 @@ def collect_rollout(env, policy, traj_len_per_env, backbone):
             "hx_before": hx.squeeze(0).cpu(),
             "cx_before": cx.squeeze(0).cpu(),
         }, batch_size=[NUM_ENVS])
-
-        print(f"step_data: {step_data}")
         
         steps.append(step_data)
         
@@ -323,30 +321,42 @@ def main():
         logger.log_scalar("train/reward_mean", rollout["reward"].mean(), step=frames_done)
         logger.log_scalar("train/reward_sum", rollout["reward"].sum(), step=frames_done)
 
-        # PPO update loop: multiple epochs over the collected trajectory
+        # PPO update loop: sample contiguous time chunks and use the correct initial LSTM state
+        # Define time-chunk length
+        TIME_CHUNK = SEQUENCE_LENGTH // NUM_MINIBATCHES
+        # Precompute time start indices for chunks
+        time_starts = torch.arange(0, SEQUENCE_LENGTH, TIME_CHUNK, device=device)
         impala_model.train()
         loss_total = []
         loss_policy = []
         loss_value = []
         loss_entropy = []
         for _ in range(PPO_EPOCHS):
-            # Randomly permute env dimension and iterate minibatches
-            perm = torch.randperm(NUM_ENVS)
-            for start in range(0, NUM_ENVS, MINIBATCH_SIZE):
-                # backbone.reset_states()
-                idx = perm[start:start+MINIBATCH_SIZE]
-                sub_batch = rollout[idx].to(device)
-                loss_dict = ppo_loss(sub_batch)
-                loss = (
-                    loss_dict["loss_objective"]
-                    + loss_dict["loss_critic"]
-                    + loss_dict["loss_entropy"]
-                )
+            # Shuffle environment indices and time chunks
+            perm_env = torch.randperm(NUM_ENVS, device=device)
+            perm_time = time_starts[torch.randperm(time_starts.shape[0], device=device)]
+            for mb in range(NUM_MINIBATCHES):
+                # Select batch of envs and time start
+                idx_env = perm_env[mb * MINIBATCH_SIZE:(mb + 1) * MINIBATCH_SIZE]
+                t0 = perm_time[mb]
+                # Slice out contiguous sub-rollout
+                sub_rollout = rollout[idx_env, t0:t0 + TIME_CHUNK]
+                # Extract and set the correct initial LSTM state from the rollout
+                hx0 = rollout["hx_before"][idx_env, t0].to(device)
+                cx0 = rollout["cx_before"][idx_env, t0].to(device)
+                # Manually set backbone state for training
+                backbone.lstm_state = (hx0.unsqueeze(0), cx0.unsqueeze(0))
+                # Compute PPO loss on this sub-rollout
+                loss_dict = ppo_loss(sub_rollout.to(device))
+                loss = loss_dict["loss_objective"] + loss_dict["loss_critic"] + loss_dict["loss_entropy"]
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(impala_model.parameters(), GRAD_CLIP_VALUE)
                 optimizer.step()
                 optimizer.zero_grad()
+                # Reset backbone internal state after each minibatch
+                backbone.reset_states()
 
+                # Accumulate losses
                 loss_total.append(loss.item())
                 loss_policy.append(loss_dict["loss_objective"].item())
                 loss_value.append(loss_dict["loss_critic"].item())
