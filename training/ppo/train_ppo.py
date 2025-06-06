@@ -49,7 +49,7 @@ PPO_BATCH_SIZE = 256
 NUM_ENVS = 16
 SEQUENCE_LENGTH = 512  # Length of sequences for LSTM
 TOTAL_FRAMES = 1_000_000
-NUM_MINIBATCHES = 4
+NUM_MINIBATCHES = 64
 MINIBATCH_SIZE = NUM_ENVS // NUM_MINIBATCHES
 
 is_fork = multiprocessing.get_start_method() == "fork"
@@ -142,6 +142,10 @@ def collect_rollout(env, policy, traj_len_per_env, backbone):
             batch_size=[NUM_ENVS],
             device=device,
         )
+
+        hx, cx = backbone.lstm_state
+        hx = hx.clone()
+        cx = cx.clone()
         
         with torch.no_grad():
             td_out = policy(td_in)
@@ -168,8 +172,6 @@ def collect_rollout(env, policy, traj_len_per_env, backbone):
         
         with torch.no_grad():
             next_td_out = policy(next_td_in)
-
-        hx, cx = backbone.lstm_state
         
         # Store the step data
         step_data = TensorDict({
@@ -321,41 +323,52 @@ def main():
         logger.log_scalar("train/reward_mean", rollout["reward"].mean(), step=frames_done)
         logger.log_scalar("train/reward_sum", rollout["reward"].sum(), step=frames_done)
 
-        # PPO update loop: sample contiguous time chunks and use the correct initial LSTM state
+        # PPO update loop: sample contiguous time chunks while avoiding episode boundaries
         # Define time-chunk length
         TIME_CHUNK = SEQUENCE_LENGTH // NUM_MINIBATCHES
-        # Precompute time start indices for chunks
+        # Candidate start positions
         time_starts = torch.arange(0, SEQUENCE_LENGTH, TIME_CHUNK, device=device)
+        # Compute valid start positions (no dones within the chunk)
+        done_mask = rollout["done"]  # shape [NUM_ENVS, SEQUENCE_LENGTH]
+        valid_starts = []
+        for t0 in time_starts.tolist():
+            # Exclude the last step of the chunk when checking for boundary
+            segment = done_mask[:, t0:t0 + TIME_CHUNK - 1]
+            no_dones = (segment == 0).all(dim=1)
+            if no_dones.sum() >= MINIBATCH_SIZE:
+                valid_starts.append(t0)
+        valid_starts = torch.tensor(valid_starts, device=device)
+        if valid_starts.numel() < NUM_MINIBATCHES:
+            raise RuntimeError(f"Not enough valid time starts ({valid_starts.numel()}) for {NUM_MINIBATCHES} minibatches")
         impala_model.train()
-        loss_total = []
-        loss_policy = []
-        loss_value = []
-        loss_entropy = []
+        loss_total, loss_policy, loss_value, loss_entropy = [], [], [], []
         for _ in range(PPO_EPOCHS):
-            # Shuffle environment indices and time chunks
-            perm_env = torch.randperm(NUM_ENVS, device=device)
-            perm_time = time_starts[torch.randperm(time_starts.shape[0], device=device)]
+            # Shuffle valid start positions
+            perm_t0 = valid_starts[torch.randperm(valid_starts.shape[0], device=device)]
             for mb in range(NUM_MINIBATCHES):
-                # Select batch of envs and time start
-                idx_env = perm_env[mb * MINIBATCH_SIZE:(mb + 1) * MINIBATCH_SIZE]
-                t0 = perm_time[mb]
+                t0 = perm_t0[mb].item()
+                # Find environments with no episode end within this chunk
+                segment = done_mask[:, t0:t0 + TIME_CHUNK - 1]
+                no_dones = (segment == 0).all(dim=1)
+                idx_env_valid = no_dones.nonzero(as_tuple=False).squeeze(-1)
+                # Randomly select environments for this minibatch
+                perm_env = idx_env_valid[torch.randperm(idx_env_valid.shape[0], device=device)]
+                idx_env = perm_env[:MINIBATCH_SIZE].cpu
                 # Slice out contiguous sub-rollout
                 sub_rollout = rollout[idx_env, t0:t0 + TIME_CHUNK]
-                # Extract and set the correct initial LSTM state from the rollout
+                # Set the correct initial LSTM state for this sub-rollout
                 hx0 = rollout["hx_before"][idx_env, t0].to(device)
                 cx0 = rollout["cx_before"][idx_env, t0].to(device)
-                # Manually set backbone state for training
                 backbone.lstm_state = (hx0.unsqueeze(0), cx0.unsqueeze(0))
-                # Compute PPO loss on this sub-rollout
+                # Compute and apply PPO loss
                 loss_dict = ppo_loss(sub_rollout.to(device))
                 loss = loss_dict["loss_objective"] + loss_dict["loss_critic"] + loss_dict["loss_entropy"]
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(impala_model.parameters(), GRAD_CLIP_VALUE)
                 optimizer.step()
                 optimizer.zero_grad()
-                # Reset backbone internal state after each minibatch
+                # Reset backbone LSTM state after minibatch
                 backbone.reset_states()
-
                 # Accumulate losses
                 loss_total.append(loss.item())
                 loss_policy.append(loss_dict["loss_objective"].item())
