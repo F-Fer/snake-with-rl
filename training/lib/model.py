@@ -69,7 +69,7 @@ class ImpalaModel(nn.Module):
         self.lstm_hidden_size = lstm_hidden_size
         self.device = device
         self.cnn = ImpalaCNN(in_channels=in_channels, feature_dim=feature_dim, height=height, width=width).to(device)
-        self.lstm = nn.LSTMCell(input_size=feature_dim, hidden_size=lstm_hidden_size).to(device)
+        self.lstm = nn.LSTM(input_size=feature_dim, hidden_size=lstm_hidden_size, batch_first=True)
 
         # Actor (policy) head
         self.policy_head = nn.Linear(lstm_hidden_size, num_actions).to(device)
@@ -78,25 +78,35 @@ class ImpalaModel(nn.Module):
 
     def initial_state(self, batch_size):
         # Hidden state and cell state for LSTM
-        return (torch.zeros(batch_size, self.lstm_hidden_size, device=self.device),
-                torch.zeros(batch_size, self.lstm_hidden_size, device=self.device))
+        return (torch.zeros(1, batch_size, self.lstm_hidden_size, device=self.device),
+                torch.zeros(1, batch_size, self.lstm_hidden_size, device=self.device))
 
     def forward(self, x: torch.Tensor,
                 core_state: tuple[torch.Tensor, torch.Tensor]):
         """
-        x          : (B, C, H, W) - one time-step for every env
-        core_state : (hx, cx) where each is (B, lstm_hidden)
+        Processes a batch of sequences.
+        
+        x          : (B, T, C, H, W) - A batch of T-step sequences.
+        core_state : The initial (h_0, c_0) for the LSTM.
         """
+        B, T = x.shape[0], x.shape[1] # B = batch size, T = sequence length
+
         if x.dtype == torch.uint8:
             x = x.float() / 255.0
 
-        x = self.cnn(x)                         # (B, feature_dim)
-        hx, cx = self.lstm(x, core_state)       # LSTMCell -> (B, hidden)
+        # Reshape for CNN: (B, T, C, H, W) -> (B * T, C, H, W)
+        cnn_in = x.view(B * T, x.shape[2], x.shape[3], x.shape[4])
+        cnn_out = self.cnn(cnn_in)
 
-        logits = self.policy_head(hx)           # (B, num_actions)
-        value  = self.value_head(hx).squeeze(-1)  # (B,)
+        # Reshape for LSTM: (B * T, feature_dim) -> (B, T, feature_dim)
+        lstm_in = cnn_out.view(B, T, -1)
 
-        return logits, value, (hx, cx)
+        lstm_out, next_core_state = self.lstm(lstm_in, core_state)
+
+        logits = self.policy_head(lstm_out)           # (B, num_actions)
+        value  = self.value_head(lstm_out).squeeze(-1)  # (B,)
+
+        return logits, value, next_core_state
 
 # Example Usage (assuming Atari-like environment)
 if __name__ == '__main__':

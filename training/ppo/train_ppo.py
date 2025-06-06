@@ -49,6 +49,8 @@ PPO_BATCH_SIZE = 256
 NUM_ENVS = 16
 SEQUENCE_LENGTH = 32  # Length of sequences for LSTM
 TOTAL_FRAMES = 1_000_000
+NUM_MINIBATCHES = 4
+MINIBATCH_SIZE = NUM_ENVS // NUM_MINIBATCHES
 
 is_fork = multiprocessing.get_start_method() == "fork"
 device = (
@@ -75,13 +77,30 @@ class ImpalaBackbone(nn.Module):
         self.lstm_state = self.impala.initial_state(self.num_envs)
 
     def forward(self, pixels):
-        # pixels: (B,C,H,W)
-        obs = pixels
+        single_obs = len(pixels.shape) == 4
         
-        logits, val, next_state = self.impala(obs, self.lstm_state)
+        if single_obs:
+            # Rollout phase (stateful):
+            # Use the managed LSTM state and add a time dimension.
+            pixels_seq = pixels.unsqueeze(1)
+            lstm_state = self.lstm_state
+        else:
+            # Training phase (stateless for each batch):
+            # Create a new initial state for this batch.
+            pixels_seq = pixels
+            batch_size = pixels_seq.shape[0]
+            lstm_state = self.impala.initial_state(batch_size)
         
-        # Update internal state
-        self.lstm_state = next_state
+        print(f"pixels_seq.shape: {pixels_seq.shape}")
+        print(f"lstm_state: {lstm_state[0].shape}")
+        logits, val, next_state = self.impala(pixels_seq, lstm_state)
+
+        # Update internal state only during stateful rollout
+        if single_obs:
+            self.lstm_state = next_state
+            # Remove the time dimension for single observations
+            logits = logits.squeeze(1)
+            val = val.squeeze(1)
 
         loc, scale = torch.chunk(logits, 2, dim=-1)
         
@@ -95,47 +114,12 @@ class ImpalaBackbone(nn.Module):
         """Reset LSTM state for environments that are done"""
         if isinstance(self.lstm_state, tuple):
             hx, cx = self.lstm_state
-            done_mask = done_mask.to(hx.device).float()
             
-            # done_mask might be [batch_size] or [batch_size, 1]
-            # hx/cx shape: [batch_size, hidden_size]
-            if done_mask.dim() == 1:
-                done_mask = done_mask.unsqueeze(1)  # [batch_size, 1]
-            elif done_mask.dim() == 2 and done_mask.size(1) != 1:
-                done_mask = done_mask.squeeze()  # Remove extra dimensions
-                if done_mask.dim() == 1:
-                    done_mask = done_mask.unsqueeze(1)
+            done_mask = done_mask.to(hx.device).float().view(1, -1, 1)
                     
             hx = hx * (1 - done_mask)
             cx = cx * (1 - done_mask)
             self.lstm_state = (hx, cx)
-
-
-class StatelessImpalaBackbone(nn.Module):
-    """
-    Stateless wrapper for training - initializes fresh LSTM state for each batch
-    """
-    def __init__(self, impala_model):
-        super().__init__()
-        self.impala = impala_model
-
-    def forward(self, pixels):
-        # pixels: (B,C,H,W)
-        obs = pixels
-        batch_size = obs.size(0)
-        
-        # Initialize fresh LSTM state for this batch
-        lstm_state = self.impala.initial_state(batch_size)
-        
-        logits, val, next_state = self.impala(obs, lstm_state)
-
-        loc, scale = torch.chunk(logits, 2, dim=-1)
-        
-        return {
-            "loc":  loc,
-            "scale": F.softplus(scale) + 1e-4,          # keep >0
-            "state_value": val,
-        }
     
 
 def collect_rollout(env, policy, traj_len_per_env, backbone):
@@ -211,7 +195,6 @@ def collect_rollout(env, policy, traj_len_per_env, backbone):
         obs = next_obs["next"]
 
     rollout = torch.stack(steps, dim=1)  # [NUM_ENVS, traj_len_per_env, ...]
-    print(rollout.shape)
     return rollout
 
 
@@ -249,9 +232,6 @@ def main():
     # Stateful backbone for data collection
     backbone = ImpalaBackbone(impala_model, NUM_ENVS).to(device)
     
-    # Stateless backbone for training
-    stateless_backbone = StatelessImpalaBackbone(impala_model).to(device)
-
     # Collection policy (stateful)
     actor_core = TensorDictModule(
         backbone,
@@ -271,26 +251,6 @@ def main():
         },
         return_log_prob=True,
     ).to(device)
-    
-    # Training policy (stateless)
-    training_actor_core = TensorDictModule(
-        stateless_backbone,
-        in_keys=["pixels"],
-        out_keys=["loc", "scale", "state_value"],
-    )
-
-    training_policy_module = ProbabilisticActor(
-        module=training_actor_core,
-        spec=env.action_spec,
-        in_keys=["loc", "scale"],
-        out_keys=["action"],
-        distribution_class=TanhNormal,
-        distribution_kwargs={
-            "low":  env.action_spec.space.low,
-            "high": env.action_spec.space.high,
-        },
-        return_log_prob=True,
-    ).to(device)
 
     # critic just re-uses the value inserted by backbone
     value_module = TensorDictModule(
@@ -298,11 +258,6 @@ def main():
         in_keys=["state_value"],
         out_keys=["state_value"],
     ).to(device)
-
-    replay_buffer = ReplayBuffer(
-        storage=LazyTensorStorage(max_size=TRAJECTORY_SIZE),
-        sampler=SamplerWithoutReplacement()
-    )
 
     advantage_module = GAE(
         gamma=GAMMA,
@@ -314,7 +269,7 @@ def main():
     )
 
     ppo_loss = ClipPPOLoss(
-        actor_network=training_policy_module,
+        actor_network=policy_module,
         critic_network=value_module,
         clip_epsilon=PPO_EPS,
         critic_coef=1.0,
@@ -347,6 +302,7 @@ def main():
         frames_done += NUM_ENVS * SEQUENCE_LENGTH
 
         # Calculate advantage on the un-flattened rollout
+        print("Calculating advantage")
         advantage_module(rollout)
 
         # Normalize advantage
@@ -355,11 +311,10 @@ def main():
             / (rollout["advantage"].std() + 1e-8)
         )
 
-        # Flatten the rollout and add to replay buffer
-        flat = rollout.reshape(-1)
-        replay_buffer.empty()
-        replay_buffer.extend(flat.cpu())
+        # Add a trailing unit dimension to advantage so PPO treats env and time dims correctly
+        rollout["advantage"] = rollout["advantage"].unsqueeze(-1)
 
+        print(f"rollout shape: {rollout.shape}")
         # PPO update loop: multiple epochs over the collected trajectory
         impala_model.train()
         
@@ -368,14 +323,19 @@ def main():
         loss_value = []
         loss_entropy = []
         for _ in range(PPO_EPOCHS):
-            for _ in range(len(flat) // PPO_BATCH_SIZE):
-                sub = replay_buffer.sample(PPO_BATCH_SIZE).to(device)
-                loss_dict = ppo_loss(sub)
-                loss = (loss_dict["loss_objective"]
-                        + loss_dict["loss_critic"]
-                        + loss_dict["loss_entropy"])
+            # Randomly permute env dimension and iterate minibatches
+            perm = torch.randperm(NUM_ENVS)
+            for start in range(0, NUM_ENVS, MINIBATCH_SIZE):
+                idx = perm[start:start+MINIBATCH_SIZE]
+                sub_batch = rollout[idx].to(device)
+                loss_dict = ppo_loss(sub_batch)
+                loss = (
+                    loss_dict["loss_objective"]
+                    + loss_dict["loss_critic"]
+                    + loss_dict["loss_entropy"]
+                )
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(impala_model.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(impala_model.parameters(), GRAD_CLIP_VALUE)
                 optimizer.step()
                 optimizer.zero_grad()
 
@@ -402,7 +362,6 @@ def main():
                 try:
                     # Simple approach: just use our manual rollout collection for evaluation
                     # Reset states and collect a shorter evaluation rollout
-                    backbone.reset_states()
                     eval_length = min(500, SEQUENCE_LENGTH * 5)  # Shorter evaluation
                     eval_rollout_dict = collect_rollout(env, policy_module, eval_length, backbone)
                     
