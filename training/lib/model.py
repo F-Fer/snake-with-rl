@@ -39,7 +39,10 @@ class ImpalaCNN(nn.Module):
         self.fc = nn.Linear(self.flattened_size, feature_dim)
 
     def forward(self, x):
-        # Input x shape: (batch_size * sequence_length, channels, height, width)
+        # Input x shape: (batch_size, channels, height, width)
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0
+            
         for block_stack in self.final_convs:
             x = block_stack(x)
         x = F.relu(x)
@@ -61,99 +64,60 @@ class ImpalaCNN(nn.Module):
             width = (width - 3 + 2*1) // 2 + 1
         return self.channels_configs[-1] * height * width
 
-class ImpalaModel(nn.Module):
-    def __init__(self, in_channels, num_actions, feature_dim=256, lstm_hidden_size=256, height=84, width=84, device=None):
-        super(ImpalaModel, self).__init__()
-        self.num_actions = num_actions
-        self.feature_dim = feature_dim
-        self.lstm_hidden_size = lstm_hidden_size
-        self.device = device
-        self.cnn = ImpalaCNN(in_channels=in_channels, feature_dim=feature_dim, height=height, width=width).to(device)
-        self.lstm = nn.LSTM(input_size=feature_dim, hidden_size=lstm_hidden_size, batch_first=True)
 
-        # Actor (policy) head
-        self.policy_head = nn.Linear(lstm_hidden_size, num_actions).to(device)
-        # Critic (value) head
-        self.value_head = nn.Linear(lstm_hidden_size, 1).to(device)
-
-    def initial_state(self, batch_size):
-        # Hidden state and cell state for LSTM
-        return (torch.zeros(1, batch_size, self.lstm_hidden_size, device=self.device),
-                torch.zeros(1, batch_size, self.lstm_hidden_size, device=self.device))
-
-    def forward(self, x: torch.Tensor,
-                core_state: tuple[torch.Tensor, torch.Tensor]):
-        """
-        Processes a batch of sequences.
+class PolicyValueHead(nn.Module):
+    """Separate actor and critic heads for the LSTM output"""
+    def __init__(self, input_size, num_actions):
+        super().__init__()
+        self.policy_head = nn.Linear(input_size, num_actions)
+        self.value_head = nn.Linear(input_size, 1)
+    
+    def forward(self, x):
+        logits = self.policy_head(x)
+        value = self.value_head(x).squeeze(-1)
         
-        x          : (B, T, C, H, W) - A batch of T-step sequences.
-        core_state : The initial (h_0, c_0) for the LSTM.
-        """
-        B, T = x.shape[0], x.shape[1] # B = batch size, T = sequence length
+        # Split logits into loc and scale for TanhNormal distribution
+        loc, scale = torch.chunk(logits, 2, dim=-1)
+        scale = F.softplus(scale) + 1e-4  # Ensure positive scale
+        
+        return {
+            "loc": loc,
+            "scale": scale,
+            "state_value": value
+        }
 
-        if x.dtype == torch.uint8:
-            x = x.float() / 255.0
 
-        # Reshape for CNN: (B, T, C, H, W) -> (B * T, C, H, W)
-        cnn_in = x.view(B * T, x.shape[2], x.shape[3], x.shape[4])
-        cnn_out = self.cnn(cnn_in)
-
-        # Reshape for LSTM: (B * T, feature_dim) -> (B, T, feature_dim)
-        lstm_in = cnn_out.view(B, T, -1)
-
-        lstm_out, next_core_state = self.lstm(lstm_in, core_state)
-
-        logits = self.policy_head(lstm_out)           # (B, num_actions)
-        value  = self.value_head(lstm_out).squeeze(-1)  # (B,)
-
-        return logits, value, next_core_state
-
-# Example Usage (assuming Atari-like environment)
+# Example Usage (if running this file directly)
 if __name__ == '__main__':
-    # N_CHANNELS: Number of input channels (e.g., 1 for grayscale, 3 for RGB, 4 for stacked frames)
-    # Typically, IMPALA uses stacked frames, e.g., 4 grayscale frames.
-    # However, the in_channels to the CNN itself would be the number of channels in one observation *after* stacking.
-    # For example, if you stack 4 grayscale (1 channel) frames, in_channels to CNN is 4.
-    # If you stack 4 RGB (3 channels) frames, then in_channels to CNN is 12.
-    # Let's assume stacked grayscale frames.
-    N_CHANNELS = 4
-    NUM_ACTIONS = 6  # Example for an Atari game
-    IMG_HEIGHT = 84 # Example, adjust to your environment
-    IMG_WIDTH = 84  # Example, adjust to your environment
+    # Test the CNN backbone
+    N_CHANNELS = 6  # Example for stacked frames
+    IMG_HEIGHT = 84
+    IMG_WIDTH = 84
+    FEATURE_DIM = 256
 
-    # Create model instance
-    model = ImpalaModel(in_channels=N_CHANNELS, num_actions=NUM_ACTIONS, height=IMG_HEIGHT, width=IMG_WIDTH)
-    print("Model created successfully.")
-    print(model)
+    # Create CNN backbone
+    cnn = ImpalaCNN(in_channels=N_CHANNELS, feature_dim=FEATURE_DIM, height=IMG_HEIGHT, width=IMG_WIDTH)
+    print("CNN backbone created successfully.")
+    print(cnn)
 
-    # Dummy input
-    sequence_length = 5
-    batch_size = 2
-    dummy_input = torch.randn(sequence_length, batch_size, N_CHANNELS, IMG_HEIGHT, IMG_WIDTH)
-    initial_core_state = model.initial_state(batch_size)
-
-    # Move model and data to device if using GPU
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    dummy_input = dummy_input.to(device)
-    initial_core_state = (initial_core_state[0].to(device), initial_core_state[1].to(device))
-
-    # Forward pass
+    # Test with dummy input
+    batch_size = 4
+    dummy_input = torch.randn(batch_size, N_CHANNELS, IMG_HEIGHT, IMG_WIDTH)
+    
     try:
-        logits, value, next_core_state = model(dummy_input, initial_core_state)
-        print("\nForward pass successful!")
-        print("Logits shape:", logits.shape)  # Expected: (sequence_length, batch_size, num_actions)
-        print("Value shape:", value.shape)    # Expected: (sequence_length, batch_size, 1)
-        print("Next hidden state shape:", next_core_state[0].shape) # Expected: (batch_size, lstm_hidden_size)
-        print("Next cell state shape:", next_core_state[1].shape)   # Expected: (batch_size, lstm_hidden_size)
-
-        # Check actor-learner output shapes if unbatched (sequence combined with batch)
-        # T_B_logits = logits.reshape(-1, NUM_ACTIONS)
-        # T_B_value = value.reshape(-1, 1)
-        # print("Reshaped Logits shape (T*B, num_actions):", T_B_logits.shape)
-        # print("Reshaped Value shape (T*B, 1):", T_B_value.shape)
-
+        cnn_output = cnn(dummy_input)
+        print(f"\nCNN forward pass successful!")
+        print(f"Input shape: {dummy_input.shape}")
+        print(f"Output shape: {cnn_output.shape}")
+        print(f"Expected output shape: ({batch_size}, {FEATURE_DIM})")
+        
+        # Test policy/value head
+        policy_value_head = PolicyValueHead(FEATURE_DIM, num_actions=4)  # 4 = 2 actions * 2 (loc + scale)
+        head_output = policy_value_head(cnn_output)
+        print(f"\nPolicy/Value head output:")
+        print(f"loc shape: {head_output['loc'].shape}")
+        print(f"scale shape: {head_output['scale'].shape}")
+        print(f"state_value shape: {head_output['state_value'].shape}")
+        
     except ValueError as e:
         print(f"\nError during forward pass: {e}")
-        print("This often happens if 'flattened_size' in ImpalaCNN is not calculated correctly "
-              "for your specific input image dimensions and CNN architecture.")

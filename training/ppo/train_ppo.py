@@ -13,19 +13,22 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import typing as tt
-from training.lib.model import ImpalaModel
+from training.lib.model import ImpalaCNN, PolicyValueHead
 import multiprocessing
 from snake_env.envs.snake_env import SnakeEnv
 from torchrl.envs.libs.gym import GymWrapper
-from torchrl.envs.transforms import ToTensorImage, TransformedEnv, Resize, FrameSkipTransform, GrayScale, CatFrames
+from torchrl.envs.transforms import (
+    ToTensorImage, TransformedEnv, Resize, FrameSkipTransform, 
+    GrayScale, CatFrames, InitTracker
+)
 from tensordict import TensorDict
-from tensordict.nn import TensorDictModule
+from tensordict.nn import TensorDictModule, TensorDictSequential
 from tensordict.nn.distributions import NormalParamExtractor
 import torch.optim as optim
 from torchrl.collectors import SyncDataCollector
 from torchrl.objectives import ClipPPOLoss
 from torchrl.envs.transforms import Compose
-from torchrl.modules import ProbabilisticActor, TanhNormal
+from torchrl.modules import ProbabilisticActor, TanhNormal, LSTMModule
 from torchrl.objectives.value import GAE
 from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
 from torchrl.data.replay_buffers.storages import LazyTensorStorage
@@ -33,6 +36,7 @@ from torchrl.data.replay_buffers import ReplayBuffer
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.envs import ParallelEnv
 from torchrl.record.loggers.tensorboard import TensorboardLogger
+from torchrl.modules.utils import get_primers_from_module
 from datetime import datetime
 import imageio
 import numpy as np
@@ -40,17 +44,16 @@ import numpy as np
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 
-TRAJECTORY_SIZE = 16_384
 LEARNING_RATE = 3e-5
-
 PPO_EPS = 0.2
-PPO_EPOCHS = 8
-PPO_BATCH_SIZE = 256
-NUM_ENVS = 16
-SEQUENCE_LENGTH = 512  # Length of sequences for LSTM
+PPO_EPOCHS = 4  # Reduced for quicker iteration
+PPO_BATCH_SIZE = 128  # Reduced for memory
+NUM_ENVS = 8  # Reduced for debugging
+SEQUENCE_LENGTH = 64  # Reduced for better memory management
 TOTAL_FRAMES = 1_000_000
-NUM_MINIBATCHES = 64
-MINIBATCH_SIZE = NUM_ENVS // NUM_MINIBATCHES
+GRAD_CLIP_VALUE = 1.0
+LSTM_HIDDEN_SIZE = 256
+CNN_FEATURE_DIM = 256
 
 is_fork = multiprocessing.get_start_method() == "fork"
 device = (
@@ -62,207 +65,121 @@ device = (
 print(f"Using device: {device}")
 
 
-class ImpalaBackbone(nn.Module):
-    """
-    Stateful wrapper that manages LSTM state internally
-    """
-    def __init__(self, impala_model, num_envs):
-        super().__init__()
-        self.impala = impala_model
-        self.num_envs = num_envs
-        self.reset_states()
-
-    def reset_states(self):
-        """Reset LSTM states for all environments"""
-        self.lstm_state = self.impala.initial_state(self.num_envs)
-
-    def forward(self, pixels):
-        single_obs = len(pixels.shape) == 4
-        
-        if single_obs:
-            # Rollout phase (stateful):
-            # Use the managed LSTM state and add a time dimension.
-            pixels_seq = pixels.unsqueeze(1)
-            lstm_state = self.lstm_state
-        else:
-            # Training phase (stateless for each batch):
-            # Create a new initial state for this batch.
-            pixels_seq = pixels
-            batch_size = pixels_seq.shape[0]
-            lstm_state = self.impala.initial_state(batch_size)
-        
-        logits, val, next_state = self.impala(pixels_seq, lstm_state)
-
-        # Update internal state only during stateful rollout
-        if single_obs:
-            self.lstm_state = next_state
-            # Remove the time dimension for single observations
-            logits = logits.squeeze(1)
-            val = val.squeeze(1)
-
-        loc, scale = torch.chunk(logits, 2, dim=-1)
-        
-        return {
-            "loc":  loc,
-            "scale": F.softplus(scale) + 1e-4,          # keep >0
-            "state_value": val,
-        }
-        
-    def reset_lstm_for_done_envs(self, done_mask):
-        """Reset LSTM state for environments that are done"""
-        if isinstance(self.lstm_state, tuple):
-            hx, cx = self.lstm_state
-            
-            done_mask = done_mask.to(hx.device).float().view(1, -1, 1)
-                    
-            hx = hx * (1 - done_mask)
-            cx = cx * (1 - done_mask)
-            self.lstm_state = (hx, cx)
+def create_policy_network(obs_shape, action_spec, device):
+    """Create the policy network using TorchRL's LSTMModule"""
     
-
-def collect_rollout(env, policy, traj_len_per_env, backbone):
-    """
-    Returns:
-        rollout     - TensorDict  [num_envs, traj_len, ...]
-    """
-    steps = []
-    
-    # Get initial observation
-    obs = env.reset()
-    
-    for step_idx in range(traj_len_per_env):
-        # Create input tensordict with current observation
-        current_pixels = obs["pixels"]
-        # Ensure pixels are on CPU before TensorDict conversion,
-        # letting TensorDict handle the move to the target device.
-        pixels_on_cpu = current_pixels.cpu()
-
-        td_in = TensorDict(
-            {"pixels": pixels_on_cpu},
-            batch_size=[NUM_ENVS],
-            device=device,
-        )
-
-        hx, cx = backbone.lstm_state
-        hx = hx.clone()
-        cx = cx.clone()
-        
-        with torch.no_grad():
-            td_out = policy(td_in)
-
-        action = td_out["action"]
-
-        # Step the environment
-        next_obs = env.step(td_out)
-        
-        # Extract rewards and dones from the stepped environment
-        reward = next_obs["next", "reward"]
-        done = next_obs["next", "done"]
-        
-        # Reset LSTM state for done episodes
-        backbone.reset_lstm_for_done_envs(done)
-
-        # Get next state value for GAE calculation
-        next_pixels_cpu = next_obs["next", "pixels"].cpu()
-        next_td_in = TensorDict(
-            {"pixels": next_pixels_cpu},
-            batch_size=[NUM_ENVS],
-            device=device,
-        )
-        
-        with torch.no_grad():
-            next_td_out = policy(next_td_in)
-        
-        # Store the step data
-        step_data = TensorDict({
-            "pixels": obs["pixels"].to(device),
-            "action": action,
-            "reward": reward.squeeze(-1).to(device),  # Remove extra dimension
-            "done": done.squeeze(-1).to(device),      # Remove extra dimension
-            "next": {
-                "pixels": next_obs["next", "pixels"].to(device),
-                "reward": reward.squeeze(-1).to(device),  # Remove extra dimension
-                "done": done.squeeze(-1).to(device),      # Remove extra dimension
-                "state_value": next_td_out["state_value"],
-            },
-            "loc": td_out["loc"],
-            "scale": td_out["scale"],
-            "sample_log_prob": td_out["sample_log_prob"],
-            "state_value": td_out["state_value"],
-            "hx_before": hx.squeeze(0).cpu(),
-            "cx_before": cx.squeeze(0).cpu(),
-        }, batch_size=[NUM_ENVS])
-        
-        steps.append(step_data)
-        
-        # Update current observation for next step
-        obs = next_obs["next"]
-
-    rollout = torch.stack(steps, dim=1)  # [NUM_ENVS, traj_len_per_env, ...]
-    return rollout
-
-
-def main():
-    # Start with simpler environment for initial learning
-    env = ParallelEnv(NUM_ENVS, lambda: GymWrapper(SnakeEnv(num_bots=20, num_foods=50, zoom_level=1.5)))
-
-    # Define the transforms to apply to the environment
-    frameskip_transform = FrameSkipTransform(4)
-    resize_transform = Resize(84)
-    grayscale_transform = GrayScale()
-
-    env = TransformedEnv(env, Compose(
-        frameskip_transform,
-        ToTensorImage(in_keys=["pixels"], dtype=torch.uint8, from_int=False),  # Use uint8 to save memory
-        # grayscale_transform,
-        resize_transform,
-        CatFrames(dim=-3, N=2, in_keys=["pixels"])
-    ))
-
-    # Test the env and get initial data spec
-    initial_data = env.reset()
-    # Remove batch dimension to get the actual observation shape
-    transformed_obs_shape = initial_data["pixels"].shape[-3:]  # Take last 3 dimensions: (C, H, W)
-
-    # Create the IMPALA model
-    impala_model = ImpalaModel(
-        in_channels=transformed_obs_shape[0], 
-        num_actions=env.action_spec.shape[-1] * 2,  # *2 for loc and scale
-        height=transformed_obs_shape[1],
-        width=transformed_obs_shape[2],
-        device=device
+    # CNN backbone
+    cnn_backbone = ImpalaCNN(
+        in_channels=obs_shape[0], 
+        feature_dim=CNN_FEATURE_DIM, 
+        height=obs_shape[1], 
+        width=obs_shape[2]
     ).to(device)
     
-    # Stateful backbone for data collection
-    backbone = ImpalaBackbone(impala_model, NUM_ENVS).to(device)
-    
-    # Collection policy (stateful)
-    actor_core = TensorDictModule(
-        backbone,
+    # CNN module
+    cnn_module = TensorDictModule(
+        cnn_backbone,
         in_keys=["pixels"],
-        out_keys=["loc", "scale", "state_value"],
+        out_keys=["cnn_features"]
     )
-
+    
+    # LSTM module - using TorchRL's LSTMModule
+    lstm_module = LSTMModule(
+        input_size=CNN_FEATURE_DIM,
+        hidden_size=LSTM_HIDDEN_SIZE,
+        in_keys=["cnn_features", "recurrent_state_h", "recurrent_state_c"],
+        out_keys=["lstm_features", ("next", "recurrent_state_h"), ("next", "recurrent_state_c")]
+    ).to(device)
+    
+    # Policy and Value heads
+    policy_value_head = PolicyValueHead(
+        input_size=LSTM_HIDDEN_SIZE,
+        num_actions=action_spec.shape[-1] * 2  # *2 for loc and scale
+    ).to(device)
+    
+    policy_value_module = TensorDictModule(
+        policy_value_head,
+        in_keys=["lstm_features"],
+        out_keys=["loc", "scale", "state_value"]
+    )
+    
+    # Combine all modules for actor
+    actor_module = TensorDictSequential(
+        cnn_module,
+        lstm_module,
+        policy_value_module
+    ).to(device)
+    
+    # Create separate value network (shares weights with actor)
+    value_network = TensorDictSequential(
+        cnn_module,
+        lstm_module,
+        TensorDictModule(
+            lambda td: {"state_value": policy_value_head(td["lstm_features"])["state_value"]},
+            in_keys=["lstm_features"],
+            out_keys=["state_value"]
+        )
+    ).to(device)
+    
+    # Wrap with ProbabilisticActor
     policy_module = ProbabilisticActor(
-        module=actor_core,
-        spec=env.action_spec,
+        module=actor_module,
+        spec=action_spec,
         in_keys=["loc", "scale"],
         out_keys=["action"],
         distribution_class=TanhNormal,
         distribution_kwargs={
-            "low":  env.action_spec.space.low,
-            "high": env.action_spec.space.high,
+            "low": action_spec.space.low,
+            "high": action_spec.space.high,
         },
         return_log_prob=True,
     ).to(device)
+    
+    return policy_module, value_network, lstm_module
 
-    # critic just re-uses the value inserted by backbone
-    value_module = TensorDictModule(
-        lambda td: td,              # identity – value already present
-        in_keys=["state_value"],
-        out_keys=["state_value"],
-    ).to(device)
 
+def main():
+    # Create environment
+    env = ParallelEnv(NUM_ENVS, lambda: GymWrapper(SnakeEnv(num_bots=20, num_foods=50, zoom_level=1.5)))
+
+    # Define transforms
+    frameskip_transform = FrameSkipTransform(4)
+    resize_transform = Resize(84)
+    init_tracker = InitTracker()  # Add InitTracker for is_init key
+    
+    env = TransformedEnv(env, Compose(
+        frameskip_transform,
+        ToTensorImage(in_keys=["pixels"], dtype=torch.uint8, from_int=False),
+        resize_transform,
+        CatFrames(dim=-3, N=2, in_keys=["pixels"]),  # Stack 2 frames
+        init_tracker  # Must be after frame stacking
+    ))
+
+    # Get observation shape
+    initial_data = env.reset()
+    obs_shape = initial_data["pixels"].shape[-3:]  # (C, H, W)
+    print(f"Observation shape: {obs_shape}")
+
+    # Create policy and value networks
+    policy_module, value_module, lstm_module = create_policy_network(
+        obs_shape, env.action_spec, device
+    )
+    
+    # Add TensorDict primer for LSTM states
+    env = env.append_transform(lstm_module.make_tensordict_primer())
+    
+    # Create data collector
+    collector = SyncDataCollector(
+        env,
+        policy_module,
+        frames_per_batch=NUM_ENVS * SEQUENCE_LENGTH,
+        total_frames=TOTAL_FRAMES,
+        device=device,
+        compile_policy=False,  # Disable compilation for debugging
+        reset_at_each_iter=False,
+    )
+
+    # Advantage calculation
     advantage_module = GAE(
         gamma=GAMMA,
         lmbda=GAE_LAMBDA,
@@ -272,6 +189,7 @@ def main():
         differentiable=True
     )
 
+    # PPO Loss
     ppo_loss = ClipPPOLoss(
         actor_network=policy_module,
         critic_network=value_module,
@@ -280,179 +198,158 @@ def main():
         loss_critic_type="smooth_l1",
     )
 
-    # Single optimizer
-    optimizer = optim.Adam(impala_model.parameters(), lr=LEARNING_RATE)
-    
-    # For gradient clipping
-    GRAD_CLIP_VALUE = 1.0
+    # Optimizer - optimize all parameters in the policy module
+    optimizer = optim.Adam(policy_module.parameters(), lr=LEARNING_RATE)
 
     # Initialize TensorBoard logger
-    run_name = f"snake_ppo_training_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_name = f"snake_ppo_torchrl_lstm_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     logger = TensorboardLogger(exp_name=run_name, log_dir="logs")
     
     # Create videos directory
     videos_dir = f"videos/{run_name}"
     os.makedirs(videos_dir, exist_ok=True)
-    
-    pbar = tqdm(total=TOTAL_FRAMES) # Use collector's actual total frames
 
     frames_done = 0
-    i = 0
-    while frames_done < TOTAL_FRAMES:
-        # Collect rollout
-        rollout = collect_rollout(
-            env, policy_module, traj_len_per_env=SEQUENCE_LENGTH, backbone=backbone)
+    pbar = tqdm(total=TOTAL_FRAMES)
+    iteration = 0
+
+    for rollout in collector:
+        frames_done += rollout.batch_size[0]
         
-        frames_done += NUM_ENVS * SEQUENCE_LENGTH
-
-        # Calculate advantage on the un-flattened rollout
-        advantage_module(rollout)
-
-        # Normalize advantage
+        # Calculate GAE advantage
+        with torch.no_grad():
+            advantage_module(rollout)
+        
+        # Normalize advantages
         rollout["advantage"] = (
             (rollout["advantage"] - rollout["advantage"].mean())
             / (rollout["advantage"].std() + 1e-8)
         )
 
-        # Add a trailing unit dimension to advantage so PPO treats env and time dims correctly
-        rollout["advantage"] = rollout["advantage"].unsqueeze(-1)
-
-        # Log the rollout
+        # Log rollout statistics
         logger.log_scalar("train/advantage_mean", rollout["advantage"].mean(), step=frames_done)
         logger.log_scalar("train/value_mean", rollout["state_value"].mean(), step=frames_done)
-        logger.log_scalar("train/reward_mean", rollout["reward"].mean(), step=frames_done)
-        logger.log_scalar("train/reward_sum", rollout["reward"].sum(), step=frames_done)
+        logger.log_scalar("train/reward_mean", rollout["next", "reward"].mean(), step=frames_done)
+        logger.log_scalar("train/reward_sum", rollout["next", "reward"].sum(), step=frames_done)
 
-        # PPO update loop: sample contiguous time chunks while avoiding episode boundaries
-        # Define time-chunk length
-        TIME_CHUNK = SEQUENCE_LENGTH // NUM_MINIBATCHES
-        # Candidate start positions
-        time_starts = torch.arange(0, SEQUENCE_LENGTH, TIME_CHUNK, device=device)
-        # Compute valid start positions (no dones within the chunk)
-        done_mask = rollout["done"]  # shape [NUM_ENVS, SEQUENCE_LENGTH]
-        valid_starts = []
-        for t0 in time_starts.tolist():
-            # Exclude the last step of the chunk when checking for boundary
-            segment = done_mask[:, t0:t0 + TIME_CHUNK - 1]
-            no_dones = (segment == 0).all(dim=1)
-            if no_dones.sum() >= MINIBATCH_SIZE:
-                valid_starts.append(t0)
-        valid_starts = torch.tensor(valid_starts, device=device)
-        if valid_starts.numel() < NUM_MINIBATCHES:
-            raise RuntimeError(f"Not enough valid time starts ({valid_starts.numel()}) for {NUM_MINIBATCHES} minibatches")
-        impala_model.train()
-        loss_total, loss_policy, loss_value, loss_entropy = [], [], [], []
-        for _ in range(PPO_EPOCHS):
-            # Shuffle valid start positions
-            perm_t0 = valid_starts[torch.randperm(valid_starts.shape[0], device=device)]
-            for mb in range(NUM_MINIBATCHES):
-                t0 = perm_t0[mb].item()
-                # Find environments with no episode end within this chunk
-                segment = done_mask[:, t0:t0 + TIME_CHUNK - 1]
-                no_dones = (segment == 0).all(dim=1)
-                idx_env_valid = no_dones.nonzero(as_tuple=False).squeeze(-1)
-                # Randomly select environments for this minibatch
-                perm_env = idx_env_valid[torch.randperm(idx_env_valid.shape[0], device=device)]
-                idx_env = perm_env[:MINIBATCH_SIZE].cpu
-                # Slice out contiguous sub-rollout
-                sub_rollout = rollout[idx_env, t0:t0 + TIME_CHUNK]
-                # Set the correct initial LSTM state for this sub-rollout
-                hx0 = rollout["hx_before"][idx_env, t0].to(device)
-                cx0 = rollout["cx_before"][idx_env, t0].to(device)
-                backbone.lstm_state = (hx0.unsqueeze(0), cx0.unsqueeze(0))
-                # Compute and apply PPO loss
-                loss_dict = ppo_loss(sub_rollout.to(device))
-                loss = loss_dict["loss_objective"] + loss_dict["loss_critic"] + loss_dict["loss_entropy"]
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(impala_model.parameters(), GRAD_CLIP_VALUE)
-                optimizer.step()
-                optimizer.zero_grad()
-                # Reset backbone LSTM state after minibatch
-                backbone.reset_states()
-                # Accumulate losses
-                loss_total.append(loss.item())
-                loss_policy.append(loss_dict["loss_objective"].item())
-                loss_value.append(loss_dict["loss_critic"].item())
-                loss_entropy.append(loss_dict["loss_entropy"].item())
-
-        # Log metrics to TensorBoard
-        logger.log_scalar("train/loss_total", np.mean(loss_total), step=frames_done)
-        logger.log_scalar("train/loss_policy", np.mean(loss_policy), step=frames_done)
-        logger.log_scalar("train/loss_value", np.mean(loss_value), step=frames_done)
-        logger.log_scalar("train/loss_entropy", np.mean(loss_entropy), step=frames_done)
-            
-        pbar.update(frames_done)
-
-        if i % 5 == 0:
-            
-            with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
-                # Reset LSTM states for evaluation
-                backbone.reset_states()
+        # PPO Training loop - simple approach using entire rollout
+        loss_values = {"loss_total": [], "loss_policy": [], "loss_value": [], "loss_entropy": []}
+        
+        # Convert rollout to proper shape for training
+        # Flatten batch and time dimensions for training
+        B, T = rollout.batch_size
+        rollout_flat = rollout.view(-1)  # Flatten to [B*T]
+        
+        # Create mini-batches from flattened rollout
+        indices = torch.randperm(B * T, device=device)
+        
+        for epoch in range(PPO_EPOCHS):
+            for i in range(0, B * T, PPO_BATCH_SIZE):
+                batch_indices = indices[i:i + PPO_BATCH_SIZE]
+                batch = rollout_flat[batch_indices]
                 
-                # execute a rollout with the trained policy
-                try:
-                    # Simple approach: just use our manual rollout collection for evaluation
-                    # Reset states and collect a shorter evaluation rollout
-                    eval_length = min(500, SEQUENCE_LENGTH * 5)  # Shorter evaluation
-                    eval_rollout_dict = collect_rollout(env, policy_module, eval_length, backbone)
-                    
-                    # Convert to format expected by rest of code
-                    eval_rollout = eval_rollout_dict
+                # Compute PPO loss
+                loss_dict = ppo_loss(batch)
+                total_loss = loss_dict["loss_objective"] + loss_dict["loss_critic"] + loss_dict["loss_entropy"]
+                
+                # Backward pass
+                optimizer.zero_grad()
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(policy_module.parameters(), GRAD_CLIP_VALUE)
+                optimizer.step()
+                
+                # Store loss values
+                loss_values["loss_total"].append(total_loss.item())
+                loss_values["loss_policy"].append(loss_dict["loss_objective"].item())
+                loss_values["loss_value"].append(loss_dict["loss_critic"].item())
+                loss_values["loss_entropy"].append(loss_dict["loss_entropy"].item())
 
-                    # Move to CPU immediately to avoid CUDA memory issues
+        # Log training metrics
+        for key, values in loss_values.items():
+            if values:
+                logger.log_scalar(f"train/{key}", np.mean(values), step=frames_done)
+
+        # Update progress bar
+        pbar.update(rollout.batch_size[0])
+
+        # Evaluation and video saving
+        if iteration % 10 == 0:  # Evaluate less frequently
+            with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
+                try:
+                    # Create evaluation collector
+                    eval_env = ParallelEnv(1, lambda: GymWrapper(SnakeEnv(num_bots=20, num_foods=50, zoom_level=1.5)))
+                    eval_env = TransformedEnv(eval_env, Compose(
+                        frameskip_transform,
+                        ToTensorImage(in_keys=["pixels"], dtype=torch.uint8, from_int=False),
+                        resize_transform,
+                        CatFrames(dim=-3, N=2, in_keys=["pixels"]),
+                        init_tracker
+                    ))
+                    eval_env = eval_env.append_transform(lstm_module.make_tensordict_primer())
+                    
+                    eval_collector = SyncDataCollector(
+                        eval_env,
+                        policy_module,
+                        frames_per_batch=500,  # Shorter evaluation
+                        total_frames=500,
+                        device=device,
+                        compile_policy=False,
+                    )
+                    
+                    eval_rollout = next(iter(eval_collector))
+                    
                     eval_reward_mean = eval_rollout["next", "reward"].cpu().mean().item()
                     eval_reward_sum = eval_rollout["next", "reward"].cpu().sum().item()
                     
-                    logger.log_scalar("eval/reward_mean", eval_reward_mean, step=i)
-                    logger.log_scalar("eval/reward_sum", eval_reward_sum, step=i)
+                    logger.log_scalar("eval/reward_mean", eval_reward_mean, step=iteration)
+                    logger.log_scalar("eval/reward_sum", eval_reward_sum, step=iteration)
                     
-                    # Save video every 10 iterations
-                    if i % 10 == 0:
+                    # Save video every 20 iterations
+                    if iteration % 20 == 0:
                         try:
-                            # Extract pixel frames from rollout
-                            # Shape should be [NUM_ENVS, sequence_length, channels, height, width]
                             pixel_frames = eval_rollout["pixels"].cpu().numpy()
                             
-                            # Take only the first environment's frames: [sequence_length, channels, height, width]
+                            # Handle dimensions: [batch, time, channels, height, width]
                             if pixel_frames.ndim == 5:
-                                pixel_frames = pixel_frames[0]  # Select first environment
+                                pixel_frames = pixel_frames[0]  # Take first environment
                             
-                            # Convert from [seq_len, C, H, W] to [seq_len, H, W, C] for video writing
+                            # Convert to video format: [time, height, width, channels]
                             pixel_frames = np.transpose(pixel_frames, (0, 2, 3, 1))
-
-                            # Handle frame stacking - take only the most recent frame (last 3 channels)
+                            
+                            # Handle frame stacking - take last 3 channels
                             if pixel_frames.shape[-1] > 3:
-                                pixel_frames = pixel_frames[:, :, :, -3:]  # Take last 3 channels (most recent frame)
+                                pixel_frames = pixel_frames[:, :, :, -3:]
                             
-                            # Convert to proper format for video saving
-                            if pixel_frames.dtype == np.uint8:
-                                # Data is already in 0-255 range as uint8, just ensure it's the right type
-                                pixel_frames = pixel_frames.astype(np.uint8)
-                            elif pixel_frames.max() <= 1.0:
-                                # Data is in 0-1 range, convert to 0-255
-                                pixel_frames = (pixel_frames * 255).astype(np.uint8)
-                            else:
-                                # Data might be in 0-255 range but as float, convert to uint8
-                                pixel_frames = pixel_frames.astype(np.uint8)
+                            # Convert to uint8 format
+                            if pixel_frames.dtype != np.uint8:
+                                if pixel_frames.max() <= 1.0:
+                                    pixel_frames = (pixel_frames * 255).astype(np.uint8)
+                                else:
+                                    pixel_frames = pixel_frames.astype(np.uint8)
                             
-                            # If grayscale (single channel), convert to RGB
+                            # Ensure RGB format
                             if pixel_frames.shape[-1] == 1:
                                 pixel_frames = np.repeat(pixel_frames, 3, axis=-1)
                             
                             # Save video
-                            video_path = f"{videos_dir}/eval_episode_{i:06d}.mp4"
-                            
-                            # Use imageio to write video (30 fps)
+                            video_path = f"{videos_dir}/eval_episode_{iteration:06d}.mp4"
                             imageio.mimwrite(video_path, pixel_frames, fps=30, quality=8)
                             
                         except Exception as video_error:
                             print(f"Failed to save video: {video_error}")
                     
+                    eval_collector.shutdown()
+                    eval_env.close()
+                    
                 except Exception as e:
                     print(f"Evaluation failed: {e}")
-                    # Skip evaluation logging for this iteration
-        i += 1
+
+        iteration += 1
+
     pbar.close()
+    collector.shutdown()
+    env.close()
+
 
 if __name__ == "__main__":
     main()
