@@ -209,8 +209,9 @@ class SnakeEnv(gym.Env):
     C3 = 5.0      # Death penalty
     SURVIVAL_REWARD = 0.1  # Small reward for staying alive
     
-    def __init__(self, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10, screen_size=256, zoom_level=1.0):
-        self.screen_size = screen_size  
+    def __init__(self, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10, screen_width=256, screen_height=256, zoom_level=1.0):
+        self.screen_width = screen_width
+        self.screen_height = screen_height
         self.render_mode = "rgb_array" 
         self.zoom_level = zoom_level 
         
@@ -239,11 +240,11 @@ class SnakeEnv(gym.Env):
         self.bot_respawn_time = 300  # Number of steps before respawning a bot
         self.bot_respawn_counter = {}  # Maps bot_id to respawn countdown
         
-        # Observation space: screen_size x screen_size x 3 image
+        # Observation space: screen_width x screen_height x 3 image
         self.observation_space = spaces.Box(
             low=0,
             high=255,
-            shape=(screen_size, screen_size, 3),
+            shape=(self.screen_height, self.screen_width, 3),
             dtype=np.uint8
         )
         
@@ -256,7 +257,8 @@ class SnakeEnv(gym.Env):
         self.grid_color = (30, 30, 30)
 
         # Calculate the effective span of the world that the camera will see for the intermediate render surface
-        self.effective_view_span = int(self.screen_size * self.zoom_level)
+        self.effective_view_width = int(self.screen_width * self.zoom_level)
+        self.effective_view_height = int(self.screen_height * self.zoom_level)
         
         # Initialize game state
         self.reset()
@@ -290,8 +292,8 @@ class SnakeEnv(gym.Env):
         self.direction_vector = (math.cos(self.direction_angle), math.sin(self.direction_angle))
         
         # Initialize camera to center on snake head
-        self.camera_x = center_x - self.effective_view_span // 2
-        self.camera_y = center_y - self.effective_view_span // 2
+        self.camera_x = center_x - self.effective_view_width // 2
+        self.camera_y = center_y - self.effective_view_height // 2
         
         # Score and game status
         self.score = 0
@@ -422,8 +424,8 @@ class SnakeEnv(gym.Env):
         self.snake_body[0] = (new_head_x, new_head_y)
         
         # Update camera position to center on snake head
-        self.camera_x = new_head_x - self.effective_view_span // 2
-        self.camera_y = new_head_y - self.effective_view_span // 2
+        self.camera_x = new_head_x - self.effective_view_width // 2
+        self.camera_y = new_head_y - self.effective_view_height // 2
         
         # Move each body segment towards the segment in front of it
         for i in range(len(self.snake_body) - 1, 0, -1):
@@ -635,8 +637,7 @@ class SnakeEnv(gym.Env):
 
     def _render_frame(self):
         # Determine dimensions of the intermediate rendering surface based on zoom
-        render_surface_dim = self.effective_view_span
-        temp_canvas = pygame.Surface((render_surface_dim, render_surface_dim))
+        temp_canvas = pygame.Surface((self.effective_view_width, self.effective_view_height))
         temp_canvas.fill(self.bg_color)  # Dark background
         
         # Calculate visible area boundaries in world coordinates for the temp_canvas
@@ -648,38 +649,38 @@ class SnakeEnv(gym.Env):
         grid_start_x_on_temp_canvas = (int(view_left) // self.grid_spacing) * self.grid_spacing - int(view_left)
         grid_start_y_on_temp_canvas = (int(view_top) // self.grid_spacing) * self.grid_spacing - int(view_top)
         
-        for x_on_temp_canvas in range(grid_start_x_on_temp_canvas, render_surface_dim + self.grid_spacing, self.grid_spacing):
-            pygame.draw.line(temp_canvas, self.grid_color, (x_on_temp_canvas, 0), (x_on_temp_canvas, render_surface_dim))
-        for y_on_temp_canvas in range(grid_start_y_on_temp_canvas, render_surface_dim + self.grid_spacing, self.grid_spacing):
-            pygame.draw.line(temp_canvas, self.grid_color, (0, y_on_temp_canvas), (render_surface_dim, y_on_temp_canvas))
+        for x_on_temp_canvas in range(grid_start_x_on_temp_canvas, self.effective_view_width + self.grid_spacing, self.grid_spacing):
+            pygame.draw.line(temp_canvas, self.grid_color, (x_on_temp_canvas, 0), (x_on_temp_canvas, self.effective_view_height))
+        for y_on_temp_canvas in range(grid_start_y_on_temp_canvas, self.effective_view_height + self.grid_spacing, self.grid_spacing):
+            pygame.draw.line(temp_canvas, self.grid_color, (0, y_on_temp_canvas), (self.effective_view_width, y_on_temp_canvas))
         
         # Draw world boundaries on temp_canvas
         # These are pixel coordinates on the temp_canvas
         bound_left_on_temp = max(0, -view_left)
-        bound_right_on_temp = min(render_surface_dim, self.world_width - view_left)
+        bound_right_on_temp = min(self.effective_view_width, self.world_width - view_left)
         bound_top_on_temp = max(0, -view_top)
-        bound_bottom_on_temp = min(render_surface_dim, self.world_height - view_top)
+        bound_bottom_on_temp = min(self.effective_view_height, self.world_height - view_top)
         
         border_color = (60, 60, 80)  # Bluish-gray
         border_thickness = 3 # This will be 3 pixels on temp_canvas, then scaled down
         
         # Left border
         if view_left <= 0:
-            pygame.draw.line(temp_canvas, border_color, (bound_left_on_temp, 0), (bound_left_on_temp, render_surface_dim), border_thickness)
+            pygame.draw.line(temp_canvas, border_color, (bound_left_on_temp, 0), (bound_left_on_temp, self.effective_view_height), border_thickness)
         
         # Right border
-        # Condition for drawing right border: right edge of view (view_left + render_surface_dim) >= world_width
-        if view_left + render_surface_dim >= self.world_width:
-            pygame.draw.line(temp_canvas, border_color, (bound_right_on_temp, 0), (bound_right_on_temp, render_surface_dim), border_thickness)
+        # Condition for drawing right border: right edge of view (view_left + self.effective_view_width) >= world_width
+        if view_left + self.effective_view_width >= self.world_width:
+            pygame.draw.line(temp_canvas, border_color, (bound_right_on_temp, 0), (bound_right_on_temp, self.effective_view_height), border_thickness)
         
         # Top border
         if view_top <= 0:
-            pygame.draw.line(temp_canvas, border_color, (0, bound_top_on_temp), (render_surface_dim, bound_top_on_temp), border_thickness)
+            pygame.draw.line(temp_canvas, border_color, (0, bound_top_on_temp), (self.effective_view_width, bound_top_on_temp), border_thickness)
         
         # Bottom border
-        # Condition for drawing bottom border: bottom edge of view (view_top + render_surface_dim) >= world_height
-        if view_top + render_surface_dim >= self.world_height:
-            pygame.draw.line(temp_canvas, border_color, (0, bound_bottom_on_temp), (render_surface_dim, bound_bottom_on_temp), border_thickness)
+        # Condition for drawing bottom border: bottom edge of view (view_top + self.effective_view_height) >= world_height
+        if view_top + self.effective_view_height >= self.world_height:
+            pygame.draw.line(temp_canvas, border_color, (0, bound_bottom_on_temp), (self.effective_view_width, bound_bottom_on_temp), border_thickness)
         
         # Draw bot snakes on temp_canvas
         for bot in self.bots:
@@ -690,8 +691,8 @@ class SnakeEnv(gym.Env):
                 screen_y = int(y - view_top)
                 
                 # Skip drawing if outside temp_canvas
-                if (screen_x < -bot.segment_radius or screen_x > render_surface_dim + bot.segment_radius or
-                    screen_y < -bot.segment_radius or screen_y > render_surface_dim + bot.segment_radius):
+                if (screen_x < -bot.segment_radius or screen_x > self.effective_view_width + bot.segment_radius or
+                    screen_y < -bot.segment_radius or screen_y > self.effective_view_height + bot.segment_radius):
                     continue
                 
                 # Gradient color from tail to head
@@ -733,8 +734,8 @@ class SnakeEnv(gym.Env):
             screen_y = int(y - view_top)
             
             # Skip drawing if outside temp_canvas
-            if (screen_x < -self.snake_segment_radius or screen_x > render_surface_dim + self.snake_segment_radius or
-                screen_y < -self.snake_segment_radius or screen_y > render_surface_dim + self.snake_segment_radius):
+            if (screen_x < -self.snake_segment_radius or screen_x > self.effective_view_width + self.snake_segment_radius or
+                screen_y < -self.snake_segment_radius or screen_y > self.effective_view_height + self.snake_segment_radius):
                 continue
             
             # Gradient color from tail to head (darker to brighter green)
@@ -776,8 +777,8 @@ class SnakeEnv(gym.Env):
             screen_y = int(food_y - view_top)
             
             # Skip if outside temp_canvas
-            if (screen_x < -self.food_radius or screen_x > render_surface_dim + self.food_radius or
-                screen_y < -self.food_radius or screen_y > render_surface_dim + self.food_radius):
+            if (screen_x < -self.food_radius or screen_x > self.effective_view_width + self.food_radius or
+                screen_y < -self.food_radius or screen_y > self.effective_view_height + self.food_radius):
                 continue
             
             # Draw a glowing effect for food on temp_canvas
@@ -792,8 +793,8 @@ class SnakeEnv(gym.Env):
             # Main food body on temp_canvas
             pygame.draw.circle(temp_canvas, (255, 50, 50), (screen_x, screen_y), int(self.food_radius))
 
-        # Scale the temp_canvas down to the final observation size (self.screen_size x self.screen_size, e.g., 84x84)
-        final_observation_canvas = pygame.transform.scale(temp_canvas, (self.screen_size, self.screen_size))
+        # Scale the temp_canvas down to the final observation size (self.screen_width x self.screen_height, e.g., 84x84)
+        final_observation_canvas = pygame.transform.scale(temp_canvas, (self.screen_width, self.screen_height))
 
         return np.transpose(
             np.array(pygame.surfarray.pixels3d(final_observation_canvas), dtype=np.uint8), axes=(1, 0, 2) # Transpose for (height, width, channel)

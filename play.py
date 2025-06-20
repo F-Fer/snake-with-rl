@@ -6,11 +6,12 @@ import math
 import numpy as np
 
 def play_snake():
-    env = gym.make('Snake-v0')
+    display_width = 720  
+    display_height = 480
+
+    env = gym.make('Snake-v0', screen_width=display_width, screen_height=display_height)
 
     pygame.init()
-    display_width = 600  
-    display_height = 600 
     screen = pygame.display.set_mode((display_width, display_height))
     pygame.display.set_caption("Snake RL Environment Viewer")
     clock = pygame.time.Clock()
@@ -47,7 +48,7 @@ def play_snake():
         # Calculate angle from display center to mouse position
         dx = mouse_x - display_center_x
         dy = mouse_y - display_center_y
-        target_direction_angle = math.atan2(dx, dy)
+        target_direction_angle = math.atan2(dy, dx)
 
         target_direction_angle %= (2 * math.pi) # Normalize angle
 
@@ -80,7 +81,8 @@ def play_snake():
 
         # Display the observation from the environment
         if observation is not None:
-            obs_surface = pygame.surfarray.make_surface(observation) 
+            # Gym returns observations as (H, W, C) but Pygame expects (W, H, C)
+            obs_surface = pygame.surfarray.make_surface(np.transpose(observation, (1, 0, 2))) 
             scaled_surface = pygame.transform.scale(obs_surface, (display_width, display_height))
             screen.blit(scaled_surface, (0, 0))
         
