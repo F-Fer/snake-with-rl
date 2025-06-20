@@ -124,3 +124,67 @@ class ViNTActorCritic(nn.Module):
         x = self.efficientnet(x)
         x = self.transformer_decoder(x)
         return self.actor(x), self.critic(x)
+    
+
+class RolloutBuffer:
+    """Buffer for storing rollout data"""
+    
+    def __init__(self, n_steps: int, n_envs: int, obs_shape: Tuple, action_dim: int, gamma: float, gae_lambda: float):
+        self.n_steps = n_steps
+        self.n_envs = n_envs
+        
+        self.gamma = gamma
+        self.gae_lambda = gae_lambda
+
+        self.observations = torch.zeros((n_steps, n_envs, *obs_shape))
+        self.actions = torch.zeros((n_steps, n_envs, action_dim))
+        self.logprobs = torch.zeros((n_steps, n_envs))
+        self.rewards = torch.zeros((n_steps, n_envs))
+        self.dones = torch.zeros((n_steps, n_envs))
+        self.values = torch.zeros((n_steps, n_envs))
+        
+        self.ptr = 0
+        self.full = False
+    
+    def add(self, obs, action, logprob, reward, done, value):
+        self.observations[self.ptr] = obs
+        self.actions[self.ptr] = action
+        self.logprobs[self.ptr] = logprob
+        self.rewards[self.ptr] = reward
+        self.dones[self.ptr] = done
+        self.values[self.ptr] = value
+        
+        self.ptr = (self.ptr + 1) % self.n_steps
+        if self.ptr == 0:
+            self.full = True
+    
+    def get(self, device):
+        """Get all data and compute advantages"""
+        # Calculate advantages using GAE
+        advantages = torch.zeros_like(self.rewards)
+        last_gae = 0
+        
+        for t in reversed(range(self.n_steps)):
+            if t == self.n_steps - 1:
+                next_value = 0  # Assuming episode ends
+            else:
+                next_value = self.values[t + 1]
+            
+            delta = self.rewards[t] + self.gamma * next_value * (1 - self.dones[t]) - self.values[t]
+            advantages[t] = delta + self.gamma * self.gae_lambda * (1 - self.dones[t]) * last_gae
+            last_gae = advantages[t]
+        
+        returns = advantages + self.values
+        
+        # Flatten batch dimensions
+        b_obs = self.observations.flatten(0, 1).to(device)
+        b_actions = self.actions.flatten(0, 1).to(device)
+        b_logprobs = self.logprobs.flatten(0, 1).to(device)
+        b_advantages = advantages.flatten(0, 1).to(device)
+        b_returns = returns.flatten(0, 1).to(device)
+        b_values = self.values.flatten(0, 1).to(device)
+        
+        # Normalize advantages
+        b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
+        
+        return b_obs, b_actions, b_logprobs, b_advantages, b_returns, b_values
