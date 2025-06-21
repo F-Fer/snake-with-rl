@@ -380,6 +380,9 @@ class SnakeEnv(gym.Env):
     
 
     def step(self, action):
+        """
+        action: [cos_val, sin_val]
+        """
         # Check if game is already over
         if self.game_over:
             observation = self._render_frame()

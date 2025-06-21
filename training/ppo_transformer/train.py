@@ -4,25 +4,30 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Normal
 import numpy as np
-import gym
+import gymnasium as gym
 from collections import namedtuple, deque
 import math
 import random
 from typing import Tuple, Optional
 from efficientnet_pytorch import EfficientNet
-
 import argparse
 import os
 import wandb
 from dataclasses import dataclass
 
+from src.snake_env.envs.snake_env import SnakeEnv
+
 @dataclass
 class Config:
+    # Output dimensions
+    output_width: int = 85 # downsample from original frame width 85 * 8
+    output_height: int = 64
+
     # Environment
     n_channels: int = 3
     frame_stack: int = 5  # N frames to stack
-    frame_width: int = 720
-    frame_height: int = 480
+    frame_width: int = output_width * 8
+    frame_height: int = output_height * 8
     
     # Model architecture (adapted from ViNT)
     d_model: int = 512
@@ -33,7 +38,7 @@ class Config:
     output_layers: list[int] = [256, 128, 64, 32]
     
     # Action space
-    action_dim: int = 4  # 2 for sine (mean, std), 2 for cosine (mean, std)
+    action_dim: int = 2  # 2 for sine (mean, std), 2 for cosine (mean, std)
     
     # PPO hyperparameters
     learning_rate: float = 3e-4
@@ -121,9 +126,30 @@ class ViNTActorCritic(nn.Module):
         self.critic = nn.Linear(config.output_layers[-1], 1)
 
     def forward(self, x):
+        """
+        x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
+        """
+        x = x.permute(0, 1, 4, 2, 3) # [batch_size, seq_len, n_channels, frame_height, frame_width]
+        batch_size, seq_len, n_channels, frame_height, frame_width = x.shape
+        x = x.view(batch_size, seq_len * n_channels, frame_height, frame_width) # [batch_size, seq_len * n_channels, frame_height, frame_width]
         x = self.efficientnet(x)
         x = self.transformer_decoder(x)
         return self.actor(x), self.critic(x)
+    
+    def get_action_and_value(self, x, use_mean=False):
+        """
+        x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
+        use_mean: if True, use the mean of the action distribution instead of sampling from it
+        """
+        action, value = self.forward(x)
+        if not use_mean:
+            action = self._compute_action_from_distribution(action)
+        return action, value
+    
+    def _compute_action_from_distribution(self, action_distribution):
+        mean, std = action_distribution.split(self.action_dim, dim=-1)
+        action = torch.normal(mean, std)
+        return action
     
 
 class RolloutBuffer:
@@ -162,7 +188,7 @@ class RolloutBuffer:
         """Get all data and compute advantages"""
         # Calculate advantages using GAE
         advantages = torch.zeros_like(self.rewards)
-        last_gae = 0
+        last_advantage = 0
         
         for t in reversed(range(self.n_steps)):
             if t == self.n_steps - 1:
@@ -171,8 +197,8 @@ class RolloutBuffer:
                 next_value = self.values[t + 1]
             
             delta = self.rewards[t] + self.gamma * next_value * (1 - self.dones[t]) - self.values[t]
-            advantages[t] = delta + self.gamma * self.gae_lambda * (1 - self.dones[t]) * last_gae
-            last_gae = advantages[t]
+            advantages[t] = delta + self.gamma * self.gae_lambda * (1 - self.dones[t]) * last_advantage
+            last_advantage = advantages[t]
         
         returns = advantages + self.values
         
@@ -188,3 +214,172 @@ class RolloutBuffer:
         b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
         
         return b_obs, b_actions, b_logprobs, b_advantages, b_returns, b_values
+
+
+def make_env(config: Config):
+    """Create environment factory"""
+    def _init():
+        env = gym.make('Snake-v0', screen_width=config.frame_width, screen_height=config.frame_height, zoom_level=1.0)
+        env = gym.wrappers.ResizeObservation(env, (config.frame_height, config.frame_width))
+        return env
+    return _init
+
+
+class PPOTrainer:
+    """PPO Trainer for Snake Environment"""
+    
+    def __init__(self, config: Config):
+        self.config = config
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Create environments
+        self.envs = [make_env(config)() for _ in range(config.n_envs)]
+        
+        # Initialize model
+        self.model = ViNTActorCritic(config).to(self.device)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=config.learning_rate)
+        
+        # Initialize buffer
+        obs_shape = (config.frame_stack, 3, config.frame_height, config.frame_width)
+        self.buffer = RolloutBuffer(config.n_steps, config.n_envs, obs_shape, 2)
+        
+        # Initialize tracking
+        self.global_step = 0
+        self.episode_rewards = []
+        
+    def collect_rollouts(self):
+        """Collect rollouts from environments"""
+        # Get initial observations
+        observations = []
+        for env in self.envs:
+            obs = env.reset()
+            observations.append(obs)
+        
+        observations = torch.FloatTensor(np.array(observations)).to(self.device)
+        
+        for step in range(self.config.n_steps):
+            with torch.no_grad():
+                action, logprob, entropy, value = self.model.get_action_and_value(observations)
+            
+            # Take actions in environments
+            next_observations = []
+            rewards = []
+            dones = []
+            
+            for i, env in enumerate(self.envs):
+                obs, reward, done, info = env.step(action[i].cpu().numpy())
+                
+                if done:
+                    obs = env.reset()
+                
+                next_observations.append(obs)
+                rewards.append(reward)
+                dones.append(done)
+            
+            # Store in buffer
+            self.buffer.add(
+                observations.cpu(),
+                action.cpu(),
+                logprob.cpu(),
+                torch.FloatTensor(rewards),
+                torch.FloatTensor(dones),
+                value.cpu().squeeze()
+            )
+            
+            observations = torch.FloatTensor(np.array(next_observations)).to(self.device)
+            self.global_step += self.config.n_envs
+    
+    def update_policy(self):
+        """Update policy using PPO"""
+        b_obs, b_actions, b_logprobs, b_advantages, b_returns, b_values = self.buffer.get(self.device)
+        
+        # Training loop
+        for epoch in range(self.config.ppo_epochs):
+            # Create mini-batches
+            batch_size = len(b_obs)
+            indices = torch.randperm(batch_size)
+            
+            for start in range(0, batch_size, self.config.mini_batch_size):
+                end = start + self.config.mini_batch_size
+                mb_indices = indices[start:end]
+                
+                # Get mini-batch data
+                mb_obs = b_obs[mb_indices]
+                mb_actions = b_actions[mb_indices] 
+                mb_logprobs = b_logprobs[mb_indices]
+                mb_advantages = b_advantages[mb_indices]
+                mb_returns = b_returns[mb_indices]
+                mb_values = b_values[mb_indices]
+                
+                # Forward pass
+                _, newlogprob, entropy, newvalue = self.model.get_action_and_value(mb_obs, mb_actions)
+                
+                # Calculate losses
+                logratio = newlogprob - mb_logprobs
+                ratio = logratio.exp()
+                
+                # Policy loss
+                pg_loss1 = -mb_advantages * ratio
+                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - self.config.clip_epsilon, 
+                                                       1 + self.config.clip_epsilon)
+                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                
+                # Value loss
+                v_loss = ((newvalue.squeeze() - mb_returns) ** 2).mean()
+                
+                # Entropy loss
+                entropy_loss = entropy.mean()
+                
+                # Total loss
+                loss = pg_loss + self.config.value_coef * v_loss - self.config.entropy_coef * entropy_loss
+                
+                # Update
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+                self.optimizer.step()
+    
+    def train(self):
+        """Main training loop"""
+        iteration = 0
+        
+        while self.global_step < self.config.total_timesteps:
+            # Collect rollouts
+            self.collect_rollouts()
+            
+            # Update policy
+            self.update_policy()
+            
+            iteration += 1
+            
+            # Logging
+            if iteration % self.config.log_interval == 0:
+                print(f"Iteration {iteration}, Global Step {self.global_step}")
+            
+            # Save model
+            if iteration % self.config.save_interval == 0:
+                torch.save(self.model.state_dict(), f"snake_ppo_model_{iteration}.pth")
+
+def main():
+    parser = argparse.ArgumentParser(description="PPO Training for Snake Environment")
+    parser.add_argument("--total_timesteps", type=int, default=1000000)
+    parser.add_argument("--learning_rate", type=float, default=3e-4)
+    parser.add_argument("--n_envs", type=int, default=8)
+    parser.add_argument("--frame_stack", type=int, default=5)
+    
+    args = parser.parse_args()
+    
+    # Create config
+    config = Config()
+    config.total_timesteps = args.total_timesteps
+    config.learning_rate = args.learning_rate
+    config.n_envs = args.n_envs
+    config.frame_stack = args.frame_stack
+    
+    # Initialize trainer
+    trainer = PPOTrainer(config)
+    
+    # Start training
+    print("Starting PPO training with ViNT-inspired Transformer architecture...")
+    print(f"Model parameters: {sum(p.numel() for p in trainer.model.parameters()):,}")
+    trainer.train()
