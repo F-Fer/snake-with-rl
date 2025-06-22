@@ -148,8 +148,8 @@ class ViNTActorCritic(nn.Module):
         # Split the action logits into mean and log_std
         # We interpret the spread on log scale, so we can exponentiate it and therefore guarantee positive values
         sin_mean, sin_log_std, cos_mean, cos_log_std = torch.chunk(action_logits, 4, dim=-1)
-        sin_std = torch.exp(sin_log_std)
-        cos_std = torch.exp(cos_log_std)
+        sin_std = torch.exp(sin_log_std.clamp(-5, 2))
+        cos_std = torch.exp(cos_log_std.clamp(-5, 2))
         
         # Create action distributions
         sin_action_distribution = torch.distributions.Normal(sin_mean, sin_std)
@@ -176,6 +176,20 @@ class ViNTActorCritic(nn.Module):
         value = value.squeeze()
             
         return action, total_log_prob, entropy, value
+    
+    def evaluate_actions(self, obs, actions):
+       """
+       obs: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
+       actions: tensor of shape [batch_size, seq_len, action_dim]
+       """
+       logits, value = self.forward(obs)
+       mean, log_std = logits[:, :2], logits[:, 2:]
+       log_std = torch.clamp(log_std, -5, 2)
+       std = torch.exp(log_std)
+       dist = Normal(mean, std)
+       log_prob = dist.log_prob(actions).sum(-1)
+       entropy   = dist.entropy().sum(-1)
+       return log_prob, entropy, value.squeeze(-1)
     
 
 class RolloutBuffer:
@@ -246,7 +260,7 @@ def make_env(config: Config):
     """Create environment factory"""
     def _init():
         env = gym.make('Snake-v0', screen_width=config.frame_width, screen_height=config.frame_height, zoom_level=1.0)
-        env = gym.wrappers.ResizeObservation(env, (config.frame_height, config.frame_width))
+        env = gym.wrappers.ResizeObservation(env, (config.output_height, config.output_width))
         env = gym.wrappers.FrameStackObservation(env, config.frame_stack)
         return env
     return _init
@@ -267,7 +281,7 @@ class PPOTrainer:
         self.optimizer = optim.Adam(self.model.parameters(), lr=config.learning_rate)
         
         # Initialize buffer
-        obs_shape = (config.frame_stack, config.frame_height, config.frame_width, config.n_channels)
+        obs_shape = (config.frame_stack, config.output_height, config.output_width, config.n_channels)
         self.buffer = RolloutBuffer(config.n_steps, config.n_envs, obs_shape, config.action_dim, config.gamma, config.gae_lambda)
         
         # Initialize tracking
@@ -310,7 +324,13 @@ class PPOTrainer:
                 torch.FloatTensor(dones),
                 values.cpu().squeeze()
             )
-            
+            if isinstance(next_observations, tuple):
+                print(next_observations)
+            expected_shape = (self.config.frame_stack, self.config.output_height, self.config.output_width, self.config.n_channels)
+            if any(next_observations[i].shape != expected_shape for i in range(len(next_observations))):
+                for i in range(len(next_observations)):
+                    if next_observations[i].shape != expected_shape:
+                        print(f"next_observations[{i}] shape: {next_observations[i].shape}")
             observations = torch.FloatTensor(np.array(next_observations)).to(self.device)
             self.global_step += self.config.n_envs
     
@@ -337,7 +357,7 @@ class PPOTrainer:
                 mb_values = b_values[mb_indices]
                 
                 # Forward pass
-                _, newlogprob, entropy, newvalue = self.model.get_action_and_value(mb_obs, mb_actions)
+                newlogprob, entropy, newvalue = self.model.evaluate_actions(mb_obs, mb_actions)
                 
                 # Calculate losses
                 logratio = newlogprob - mb_logprobs
@@ -370,9 +390,11 @@ class PPOTrainer:
         
         while self.global_step < self.config.total_timesteps:
             # Collect rollouts
+            print(f"Collecting rollouts...")
             self.collect_rollouts()
             
             # Update policy
+            print(f"Updating policy...")
             self.update_policy()
             
             iteration += 1
