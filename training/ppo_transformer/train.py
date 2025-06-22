@@ -136,26 +136,43 @@ class ViNTActorCritic(nn.Module):
         x = self.transformer_decoder(x)
         return self.actor(x), self.critic(x)
     
-    def get_action_and_value(self, x, use_mean=False):
+    def get_action_and_value(self, x):
         """
         x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
-        use_mean: if True, use the mean of the action distribution instead of sampling from it
         """
         action_logits, value = self.forward(x) # [batch_size, 4]
         
         # Split the action logits into mean and log_std
         # We interpret the spread on log scale, so we can exponentiate it and therefore guarantee positive values
-        mean, log_std = action_logits.split(self.config.action_dim, dim=-1) 
-        std = torch.exp(log_std)
+        sin_mean, sin_log_std, cos_mean, cos_log_std = torch.chunk(action_logits, 4, dim=-1)
+        sin_std = torch.exp(sin_log_std)
+        cos_std = torch.exp(cos_log_std)
         
-        if not use_mean:
-            # Sample from the normal distribution
-            action = torch.normal(mean, std)
-        else:
-            # Use the mean directly
-            action = mean
+        # Create action distributions
+        sin_action_distribution = torch.distributions.Normal(sin_mean, sin_std)
+        cos_action_distribution = torch.distributions.Normal(cos_mean, cos_std)
+
+        # Sample from the action distributions
+        sin_action = sin_action_distribution.sample()
+        cos_action = cos_action_distribution.sample()
+
+        # Combine the actions
+        action = torch.cat([sin_action, cos_action], dim=-1)
+
+        # Calculate log probabilities
+        sin_log_prob = sin_action_distribution.log_prob(sin_action).sum(dim=-1)
+        cos_log_prob = cos_action_distribution.log_prob(cos_action).sum(dim=-1)
+        total_log_prob = sin_log_prob + cos_log_prob
+
+        # Calculate entropy
+        sin_entropy = sin_action_distribution.entropy().sum(dim=-1)
+        cos_entropy = cos_action_distribution.entropy().sum(dim=-1)
+        entropy = sin_entropy + cos_entropy
+
+        # Calculate value
+        value = value.squeeze()
             
-        return action, value
+        return action, total_log_prob, entropy, value
     
 
 class RolloutBuffer:
@@ -294,7 +311,7 @@ class PPOTrainer:
     
     def update_policy(self):
         """Update policy using PPO"""
-        b_obs, b_actions, b_logprobs, b_advantages, b_returns, b_values = self.buffer.get(self.device)
+        b_obs, b_actions, b_advantages, b_returns, b_values = self.buffer.get(self.device)
         
         # Training loop
         for epoch in range(self.config.ppo_epochs):
