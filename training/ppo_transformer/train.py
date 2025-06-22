@@ -308,12 +308,12 @@ class PPOTrainer:
             for i, env in enumerate(self.envs):
                 obs, reward, done, truncated, info = env.step(actions[i].cpu().numpy())
                 
-                if done:
-                    obs = env.reset()
+                if done or truncated:
+                    obs, info = env.reset()
                 
                 next_observations.append(obs)
                 rewards.append(reward)
-                dones.append(done)
+                dones.append(done or truncated)
             
             # Store in buffer
             self.buffer.add(
@@ -324,13 +324,7 @@ class PPOTrainer:
                 torch.FloatTensor(dones),
                 values.cpu().squeeze()
             )
-            if isinstance(next_observations, tuple):
-                print(next_observations)
-            expected_shape = (self.config.frame_stack, self.config.output_height, self.config.output_width, self.config.n_channels)
-            if any(next_observations[i].shape != expected_shape for i in range(len(next_observations))):
-                for i in range(len(next_observations)):
-                    if next_observations[i].shape != expected_shape:
-                        print(f"next_observations[{i}] shape: {next_observations[i].shape}")
+            
             observations = torch.FloatTensor(np.array(next_observations)).to(self.device)
             self.global_step += self.config.n_envs
     
