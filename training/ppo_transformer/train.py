@@ -12,6 +12,9 @@ from typing import Tuple, Optional
 from efficientnet_pytorch import EfficientNet
 import argparse
 from dataclasses import dataclass, field
+from torch.utils.tensorboard import SummaryWriter
+import os
+from datetime import datetime
 
 from snake_env.envs.snake_env import SnakeEnv
 
@@ -59,6 +62,7 @@ class Config:
     log_interval: int = 10
     save_interval: int = 100
     eval_interval: int = 50
+    log_dir: str = "logs/tensorboard"
 
 
 class PositionalEncoding(nn.Module):
@@ -273,6 +277,12 @@ class PPOTrainer:
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
+        # Setup TensorBoard logging
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_dir = os.path.join(config.log_dir, f"snake_ppo_{timestamp}")
+        os.makedirs(log_dir, exist_ok=True)
+        self.writer = SummaryWriter(log_dir)
+        
         # Create environments
         self.envs = [make_env(config)() for _ in range(config.n_envs)]
         
@@ -287,6 +297,15 @@ class PPOTrainer:
         # Initialize tracking
         self.global_step = 0
         self.episode_rewards = []
+        self.episode_lengths = []
+        self.training_metrics = {
+            'policy_loss': [],
+            'value_loss': [],
+            'entropy_loss': [],
+            'total_loss': [],
+            'clip_fraction': [],
+            'explained_variance': []
+        }
         
     def collect_rollouts(self):
         """Collect rollouts from environments"""
@@ -296,6 +315,11 @@ class PPOTrainer:
             obs, info = env.reset()
             observations.append(obs)
         observations = torch.FloatTensor(np.array(observations)).to(self.device) # [n_env, seq_len, height, width, n_channels]
+        
+        # Track episode metrics
+        episode_rewards = [0] * self.config.n_envs
+        episode_lengths = [0] * self.config.n_envs
+        
         for step in range(self.config.n_steps):
             with torch.no_grad():
                 actions, logprobs, entropy, values = self.model.get_action_and_value(observations)
@@ -308,7 +332,16 @@ class PPOTrainer:
             for i, env in enumerate(self.envs):
                 obs, reward, done, truncated, info = env.step(actions[i].cpu().numpy())
                 
+                # Track episode metrics
+                episode_rewards[i] += reward
+                episode_lengths[i] += 1
+                
                 if done or truncated:
+                    # Log completed episode
+                    self.episode_rewards.append(episode_rewards[i])
+                    self.episode_lengths.append(episode_lengths[i])
+                    episode_rewards[i] = 0
+                    episode_lengths[i] = 0
                     obs, info = env.reset()
                 
                 next_observations.append(obs)
@@ -331,6 +364,14 @@ class PPOTrainer:
     def update_policy(self):
         """Update policy using PPO"""
         b_obs, b_actions, b_logprobs, b_advantages, b_returns, b_values = self.buffer.get(self.device)
+        
+        # Training metrics for this update
+        epoch_policy_losses = []
+        epoch_value_losses = []
+        epoch_entropy_losses = []
+        epoch_total_losses = []
+        epoch_clip_fractions = []
+        epoch_explained_variances = []
         
         # Training loop
         for epoch in range(self.config.ppo_epochs):
@@ -372,34 +413,108 @@ class PPOTrainer:
                 # Total loss
                 loss = pg_loss + self.config.value_coef * v_loss - self.config.entropy_coef * entropy_loss
                 
+                # Calculate additional metrics
+                clip_fraction = (abs(ratio - 1) > self.config.clip_epsilon).float().mean()
+                explained_variance = 1 - torch.var(mb_returns - newvalue.squeeze()) / torch.var(mb_returns)
+                
+                # Store metrics
+                epoch_policy_losses.append(pg_loss.item())
+                epoch_value_losses.append(v_loss.item())
+                epoch_entropy_losses.append(entropy_loss.item())
+                epoch_total_losses.append(loss.item())
+                epoch_clip_fractions.append(clip_fraction.item())
+                epoch_explained_variances.append(explained_variance.item())
+                
                 # Update
                 self.optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
                 self.optimizer.step()
+        
+        # Store average metrics for this update
+        self.training_metrics['policy_loss'].append(np.mean(epoch_policy_losses))
+        self.training_metrics['value_loss'].append(np.mean(epoch_value_losses))
+        self.training_metrics['entropy_loss'].append(np.mean(epoch_entropy_losses))
+        self.training_metrics['total_loss'].append(np.mean(epoch_total_losses))
+        self.training_metrics['clip_fraction'].append(np.mean(epoch_clip_fractions))
+        self.training_metrics['explained_variance'].append(np.mean(epoch_explained_variances))
+    
+    def log_metrics(self, iteration):
+        """Log metrics to TensorBoard"""
+        # Log training metrics
+        if len(self.training_metrics['policy_loss']) > 0:
+            self.writer.add_scalar('Loss/Policy', self.training_metrics['policy_loss'][-1], iteration)
+            self.writer.add_scalar('Loss/Value', self.training_metrics['value_loss'][-1], iteration)
+            self.writer.add_scalar('Loss/Entropy', self.training_metrics['entropy_loss'][-1], iteration)
+            self.writer.add_scalar('Loss/Total', self.training_metrics['total_loss'][-1], iteration)
+            self.writer.add_scalar('Metrics/ClipFraction', self.training_metrics['clip_fraction'][-1], iteration)
+            self.writer.add_scalar('Metrics/ExplainedVariance', self.training_metrics['explained_variance'][-1], iteration)
+        
+        # Log episode metrics (last 100 episodes for rolling average)
+        if len(self.episode_rewards) > 0:
+            recent_rewards = self.episode_rewards[-100:]
+            recent_lengths = self.episode_lengths[-100:]
+            
+            self.writer.add_scalar('Episode/Reward_Mean', np.mean(recent_rewards), iteration)
+            self.writer.add_scalar('Episode/Reward_Std', np.std(recent_rewards), iteration)
+            self.writer.add_scalar('Episode/Reward_Max', np.max(recent_rewards), iteration)
+            self.writer.add_scalar('Episode/Reward_Min', np.min(recent_rewards), iteration)
+            
+            self.writer.add_scalar('Episode/Length_Mean', np.mean(recent_lengths), iteration)
+            self.writer.add_scalar('Episode/Length_Std', np.std(recent_lengths), iteration)
+        
+        # Log learning rate
+        self.writer.add_scalar('Training/LearningRate', self.config.learning_rate, iteration)
+        
+        # Log model parameters
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        self.writer.add_scalar('Model/TotalParameters', total_params, iteration)
+        self.writer.add_scalar('Model/TrainableParameters', trainable_params, iteration)
+        
+        # Log gradients norm
+        total_norm = 0
+        for p in self.model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** (1. / 2)
+        self.writer.add_scalar('Training/GradientNorm', total_norm, iteration)
+        
+        # Flush writer
+        self.writer.flush()
     
     def train(self):
         """Main training loop"""
         iteration = 0
         
-        while self.global_step < self.config.total_timesteps:
-            # Collect rollouts
-            print(f"Collecting rollouts...")
-            self.collect_rollouts()
-            
-            # Update policy
-            print(f"Updating policy...")
-            self.update_policy()
-            
-            iteration += 1
-            
-            # Logging
-            if iteration % self.config.log_interval == 0:
-                print(f"Iteration {iteration}, Global Step {self.global_step}")
-            
-            # Save model
-            if iteration % self.config.save_interval == 0:
-                torch.save(self.model.state_dict(), f"snake_ppo_model_{iteration}.pth")
+        try:
+            while self.global_step < self.config.total_timesteps:
+                # Collect rollouts
+                print(f"Collecting rollouts...")
+                self.collect_rollouts()
+                
+                # Update policy
+                print(f"Updating policy...")
+                self.update_policy()
+                
+                iteration += 1
+                
+                # Logging
+                if iteration % self.config.log_interval == 0:
+                    print(f"Iteration {iteration}, Global Step {self.global_step}")
+                    self.log_metrics(iteration)
+                
+                # Save model
+                if iteration % self.config.save_interval == 0:
+                    torch.save(self.model.state_dict(), f"snake_ppo_model_{iteration}.pth")
+        
+        except KeyboardInterrupt:
+            print("Training interrupted by user")
+        finally:
+            # Close TensorBoard writer
+            self.writer.close()
+            print("TensorBoard logging closed")
 
 def main():
     parser = argparse.ArgumentParser(description="PPO Training for Snake Environment")
@@ -407,6 +522,7 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--n_envs", type=int, default=8)
     parser.add_argument("--frame_stack", type=int, default=5)
+    parser.add_argument("--log_dir", type=str, default="logs/tensorboard")
     
     args = parser.parse_args()
     
@@ -416,6 +532,7 @@ def main():
     config.learning_rate = args.learning_rate
     config.n_envs = args.n_envs
     config.frame_stack = args.frame_stack
+    config.log_dir = args.log_dir
     
     # Initialize trainer
     trainer = PPOTrainer(config)
@@ -423,6 +540,7 @@ def main():
     # Start training
     print("Starting PPO training...")
     print(f"Model parameters: {sum(p.numel() for p in trainer.model.parameters()):,}")
+    print(f"TensorBoard logs will be saved to: {os.path.join(config.log_dir, 'snake_ppo_*')}")
     trainer.train()
 
 
