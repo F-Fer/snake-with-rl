@@ -141,15 +141,21 @@ class ViNTActorCritic(nn.Module):
         x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
         use_mean: if True, use the mean of the action distribution instead of sampling from it
         """
-        action, value = self.forward(x)
+        action_logits, value = self.forward(x) # [batch_size, 4]
+        
+        # Split the action logits into mean and log_std
+        # We interpret the spread on log scale, so we can exponentiate it and therefore guarantee positive values
+        mean, log_std = action_logits.split(self.config.action_dim, dim=-1) 
+        std = torch.exp(log_std)
+        
         if not use_mean:
-            action = self._compute_action_from_distribution(action)
+            # Sample from the normal distribution
+            action = torch.normal(mean, std)
+        else:
+            # Use the mean directly
+            action = mean
+            
         return action, value
-    
-    def _compute_action_from_distribution(self, action_distribution):
-        mean, std = action_distribution.split(self.action_dim, dim=-1)
-        action = torch.normal(mean, std)
-        return action
     
 
 class RolloutBuffer:
@@ -175,7 +181,6 @@ class RolloutBuffer:
     def add(self, obs, action, logprob, reward, done, value):
         self.observations[self.ptr] = obs
         self.actions[self.ptr] = action
-        self.logprobs[self.ptr] = logprob
         self.rewards[self.ptr] = reward
         self.dones[self.ptr] = done
         self.values[self.ptr] = value
@@ -205,7 +210,6 @@ class RolloutBuffer:
         # Flatten batch dimensions
         b_obs = self.observations.flatten(0, 1).to(device)
         b_actions = self.actions.flatten(0, 1).to(device)
-        b_logprobs = self.logprobs.flatten(0, 1).to(device)
         b_advantages = advantages.flatten(0, 1).to(device)
         b_returns = returns.flatten(0, 1).to(device)
         b_values = self.values.flatten(0, 1).to(device)
@@ -213,7 +217,7 @@ class RolloutBuffer:
         # Normalize advantages
         b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
         
-        return b_obs, b_actions, b_logprobs, b_advantages, b_returns, b_values
+        return b_obs, b_actions, b_advantages, b_returns, b_values
 
 
 def make_env(config: Config):
@@ -241,7 +245,7 @@ class PPOTrainer:
         
         # Initialize buffer
         obs_shape = (config.frame_stack, 3, config.frame_height, config.frame_width)
-        self.buffer = RolloutBuffer(config.n_steps, config.n_envs, obs_shape, 2)
+        self.buffer = RolloutBuffer(config.n_steps, config.n_envs, obs_shape, config.action_dim)
         
         # Initialize tracking
         self.global_step = 0
@@ -255,11 +259,11 @@ class PPOTrainer:
             obs = env.reset()
             observations.append(obs)
         
-        observations = torch.FloatTensor(np.array(observations)).to(self.device)
+        observations = torch.FloatTensor(np.array(observations)).to(self.device) # [n_env, height, width, n_channels]
         
         for step in range(self.config.n_steps):
             with torch.no_grad():
-                action, logprob, entropy, value = self.model.get_action_and_value(observations)
+                actions, values = self.model.get_action_and_value(observations)
             
             # Take actions in environments
             next_observations = []
@@ -267,7 +271,7 @@ class PPOTrainer:
             dones = []
             
             for i, env in enumerate(self.envs):
-                obs, reward, done, info = env.step(action[i].cpu().numpy())
+                obs, reward, done, info = env.step(actions[i].cpu().numpy())
                 
                 if done:
                     obs = env.reset()
@@ -279,11 +283,10 @@ class PPOTrainer:
             # Store in buffer
             self.buffer.add(
                 observations.cpu(),
-                action.cpu(),
-                logprob.cpu(),
+                actions.cpu(),
                 torch.FloatTensor(rewards),
                 torch.FloatTensor(dones),
-                value.cpu().squeeze()
+                values.cpu().squeeze()
             )
             
             observations = torch.FloatTensor(np.array(next_observations)).to(self.device)
