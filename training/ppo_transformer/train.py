@@ -11,11 +11,9 @@ import random
 from typing import Tuple, Optional
 from efficientnet_pytorch import EfficientNet
 import argparse
-import os
-import wandb
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from src.snake_env.envs.snake_env import SnakeEnv
+from snake_env.envs.snake_env import SnakeEnv
 
 @dataclass
 class Config:
@@ -26,8 +24,8 @@ class Config:
     # Environment
     n_channels: int = 3
     frame_stack: int = 5  # N frames to stack
-    frame_width: int = output_width * 8
-    frame_height: int = output_height * 8
+    frame_width: int = 680 # output_width * 8
+    frame_height: int = 512 # output_height * 8
     
     # Model architecture (adapted from ViNT)
     d_model: int = 512
@@ -35,7 +33,7 @@ class Config:
     n_layers: int = 4
     d_ff: int = 2048
     dropout: float = 0.1
-    output_layers: list[int] = [256, 128, 64, 32]
+    output_layers: list[int] = field(default_factory=lambda: [256, 128, 64, 32])
     
     # Action space
     action_dim: int = 2  # 2 for sine (mean, std), 2 for cosine (mean, std)
@@ -55,7 +53,7 @@ class Config:
     ppo_epochs: int = 4
     n_envs: int = 8
     n_steps: int = 128
-    total_timesteps: int = 1000000
+    total_timesteps: int = 1_000_000
     
     # Logging
     log_interval: int = 10
@@ -121,6 +119,9 @@ class ViNTActorCritic(nn.Module):
         # Initialize the transformer backnbone
         self.transformer_decoder = MultiLayerDecoder(embed_dim=config.d_model, seq_len=config.frame_stack, output_layers=config.output_layers)
 
+        # Adapter to go from the output of the convnet to the input d_model of the transformer
+        self.adapter = nn.Linear(1000, config.d_model) # TODO: change this to the output of the convnet dynamically or smt
+
         # Initialize the actor and critic networks
         self.actor = nn.Linear(config.output_layers[-1], config.action_dim * 2) # 2 for sine and cosine
         self.critic = nn.Linear(config.output_layers[-1], 1)
@@ -129,10 +130,12 @@ class ViNTActorCritic(nn.Module):
         """
         x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
         """
-        x = x.permute(0, 1, 4, 2, 3) # [batch_size, seq_len, n_channels, frame_height, frame_width]
+        x = x.permute(0, 1, 4, 2, 3) # [batch_size, seq_len, n_channels, frame_height, frame_width]\
         batch_size, seq_len, n_channels, frame_height, frame_width = x.shape
-        x = x.view(batch_size, seq_len * n_channels, frame_height, frame_width) # [batch_size, seq_len * n_channels, frame_height, frame_width]
+        x = x.view(batch_size * seq_len, n_channels, frame_height, frame_width) # [batch_size * seq_len, n_channels, frame_height, frame_width]
         x = self.efficientnet(x)
+        x = self.adapter(x)
+        x = x.view(batch_size, seq_len, -1) # [batch_size, seq_len, 1000]
         x = self.transformer_decoder(x)
         return self.actor(x), self.critic(x)
     
@@ -198,6 +201,7 @@ class RolloutBuffer:
     def add(self, obs, action, logprob, reward, done, value):
         self.observations[self.ptr] = obs
         self.actions[self.ptr] = action
+        self.logprobs[self.ptr] = logprob
         self.rewards[self.ptr] = reward
         self.dones[self.ptr] = done
         self.values[self.ptr] = value
@@ -227,6 +231,7 @@ class RolloutBuffer:
         # Flatten batch dimensions
         b_obs = self.observations.flatten(0, 1).to(device)
         b_actions = self.actions.flatten(0, 1).to(device)
+        b_logprobs = self.logprobs.flatten(0, 1).to(device)
         b_advantages = advantages.flatten(0, 1).to(device)
         b_returns = returns.flatten(0, 1).to(device)
         b_values = self.values.flatten(0, 1).to(device)
@@ -234,7 +239,7 @@ class RolloutBuffer:
         # Normalize advantages
         b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
         
-        return b_obs, b_actions, b_advantages, b_returns, b_values
+        return b_obs, b_actions, b_logprobs, b_advantages, b_returns, b_values
 
 
 def make_env(config: Config):
@@ -242,6 +247,7 @@ def make_env(config: Config):
     def _init():
         env = gym.make('Snake-v0', screen_width=config.frame_width, screen_height=config.frame_height, zoom_level=1.0)
         env = gym.wrappers.ResizeObservation(env, (config.frame_height, config.frame_width))
+        env = gym.wrappers.FrameStackObservation(env, config.frame_stack)
         return env
     return _init
 
@@ -261,8 +267,8 @@ class PPOTrainer:
         self.optimizer = optim.Adam(self.model.parameters(), lr=config.learning_rate)
         
         # Initialize buffer
-        obs_shape = (config.frame_stack, 3, config.frame_height, config.frame_width)
-        self.buffer = RolloutBuffer(config.n_steps, config.n_envs, obs_shape, config.action_dim)
+        obs_shape = (config.frame_stack, config.frame_height, config.frame_width, config.n_channels)
+        self.buffer = RolloutBuffer(config.n_steps, config.n_envs, obs_shape, config.action_dim, config.gamma, config.gae_lambda)
         
         # Initialize tracking
         self.global_step = 0
@@ -273,14 +279,12 @@ class PPOTrainer:
         # Get initial observations
         observations = []
         for env in self.envs:
-            obs = env.reset()
+            obs, info = env.reset()
             observations.append(obs)
-        
-        observations = torch.FloatTensor(np.array(observations)).to(self.device) # [n_env, height, width, n_channels]
-        
+        observations = torch.FloatTensor(np.array(observations)).to(self.device) # [n_env, seq_len, height, width, n_channels]
         for step in range(self.config.n_steps):
             with torch.no_grad():
-                actions, values = self.model.get_action_and_value(observations)
+                actions, logprobs, entropy, values = self.model.get_action_and_value(observations)
             
             # Take actions in environments
             next_observations = []
@@ -288,7 +292,7 @@ class PPOTrainer:
             dones = []
             
             for i, env in enumerate(self.envs):
-                obs, reward, done, info = env.step(actions[i].cpu().numpy())
+                obs, reward, done, truncated, info = env.step(actions[i].cpu().numpy())
                 
                 if done:
                     obs = env.reset()
@@ -301,6 +305,7 @@ class PPOTrainer:
             self.buffer.add(
                 observations.cpu(),
                 actions.cpu(),
+                logprobs.cpu(),
                 torch.FloatTensor(rewards),
                 torch.FloatTensor(dones),
                 values.cpu().squeeze()
@@ -311,7 +316,7 @@ class PPOTrainer:
     
     def update_policy(self):
         """Update policy using PPO"""
-        b_obs, b_actions, b_advantages, b_returns, b_values = self.buffer.get(self.device)
+        b_obs, b_actions, b_logprobs, b_advantages, b_returns, b_values = self.buffer.get(self.device)
         
         # Training loop
         for epoch in range(self.config.ppo_epochs):
@@ -400,6 +405,10 @@ def main():
     trainer = PPOTrainer(config)
     
     # Start training
-    print("Starting PPO training with ViNT-inspired Transformer architecture...")
+    print("Starting PPO training...")
     print(f"Model parameters: {sum(p.numel() for p in trainer.model.parameters()):,}")
     trainer.train()
+
+
+if __name__ == "__main__":
+    main()
