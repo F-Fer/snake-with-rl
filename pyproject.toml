@@ -15,6 +15,7 @@ dependencies = [
     "matplotlib>=3.10.3",
     "mujoco>=3.3.2",
     "numpy>=1.21.0",
+    "opencv-python>=4.11.0.86",
     "pygame>=2.1.0",
     "tensorboard>=2.19.0",
     "tensordict>=0.8.3",
