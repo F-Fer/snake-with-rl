@@ -112,10 +112,42 @@ class MultiLayerDecoder(nn.Module):
         return x
     
 
+class ImagePreprocessor(nn.Module):
+    def __init__(self):
+        super(ImagePreprocessor, self).__init__()
+        # EfficientNet ImageNet normalization parameters
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
+    def forward(self, x):
+        """
+        Preprocess images for EfficientNet
+        Args:
+            x: tensor of shape [..., H, W, C] with values in range [0, 1] (float32)
+               or [..., H, W, C] with values in range [0, 255] (uint8)
+        Returns:
+            tensor of shape [..., C, H, W] normalized for EfficientNet
+        """
+        # Handle uint8 input by converting to float32 and normalizing to [0, 1]
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0
+        
+        # Convert from [..., H, W, C] to [..., C, H, W]
+        x = x.permute(*range(len(x.shape) - 3), -1, -3, -2)
+        
+        # Apply ImageNet normalization
+        x = (x - self.mean) / self.std
+        
+        return x
+
+
 class ViNTActorCritic(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
+
+        # Initialize the image preprocessor
+        self.image_preprocessor = ImagePreprocessor()
 
         # Initialize the EfficientNet model
         self.efficientnet = EfficientNet.from_pretrained('efficientnet-b0', in_channels=config.n_channels)
@@ -124,7 +156,7 @@ class ViNTActorCritic(nn.Module):
         self.transformer_decoder = MultiLayerDecoder(embed_dim=config.d_model, seq_len=config.frame_stack, output_layers=config.output_layers)
 
         # Adapter to go from the output of the convnet to the input d_model of the transformer
-        self.adapter = nn.Linear(1000, config.d_model) # TODO: change this to the output of the convnet dynamically or smt
+        self.adapter = nn.Linear(1280, config.d_model) # TODO: change this to the output of the convnet dynamically or smt
 
         # Initialize the actor and critic networks
         self.actor = nn.Linear(config.output_layers[-1], config.action_dim * 2) # 2 for sine and cosine
@@ -134,13 +166,28 @@ class ViNTActorCritic(nn.Module):
         """
         x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
         """
-        x = x.permute(0, 1, 4, 2, 3) # [batch_size, seq_len, n_channels, frame_height, frame_width]\
-        batch_size, seq_len, n_channels, frame_height, frame_width = x.shape
-        x = x.view(batch_size * seq_len, n_channels, frame_height, frame_width) # [batch_size * seq_len, n_channels, frame_height, frame_width]
-        x = self.efficientnet(x)
+        batch_size, seq_len, frame_height, frame_width, n_channels = x.shape
+        
+        # Reshape to process all frames at once
+        x = x.view(batch_size * seq_len, frame_height, frame_width, n_channels)
+        
+        # Preprocess images (converts to [batch_size * seq_len, n_channels, frame_height, frame_width] and normalizes)
+        x = self.image_preprocessor(x)
+        
+        # Extract features using EfficientNet
+        x = self.efficientnet.extract_features(x)
+        x = self.efficientnet._avg_pooling(x) # [batch_size * seq_len, 1280, 1, 1]
+        x = torch.flatten(x, start_dim=1) # [batch_size * seq_len, 1280]
+        
+        # Apply adapter
         x = self.adapter(x)
-        x = x.view(batch_size, seq_len, -1) # [batch_size, seq_len, 1000]
+        
+        # Reshape back to sequence format
+        x = x.view(batch_size, seq_len, -1) # [batch_size, seq_len, d_model]
+        
+        # Apply transformer
         x = self.transformer_decoder(x)
+        
         return self.actor(x), self.critic(x)
     
     def get_action_and_value(self, x):
@@ -206,7 +253,8 @@ class RolloutBuffer:
         self.gamma = gamma
         self.gae_lambda = gae_lambda
 
-        self.observations = torch.zeros((n_steps, n_envs, *obs_shape))
+        # Store observations as uint8 to save memory
+        self.observations = torch.zeros((n_steps, n_envs, *obs_shape), dtype=torch.uint8)
         self.actions = torch.zeros((n_steps, n_envs, action_dim))
         self.logprobs = torch.zeros((n_steps, n_envs))
         self.rewards = torch.zeros((n_steps, n_envs))
@@ -246,8 +294,8 @@ class RolloutBuffer:
         
         returns = advantages + self.values
         
-        # Flatten batch dimensions
-        b_obs = self.observations.flatten(0, 1).to(device)
+        # Flatten batch dimensions and convert observations back to float32
+        b_obs = self.observations.flatten(0, 1).to(device).float() / 255.0
         b_actions = self.actions.flatten(0, 1).to(device)
         b_logprobs = self.logprobs.flatten(0, 1).to(device)
         b_advantages = advantages.flatten(0, 1).to(device)
