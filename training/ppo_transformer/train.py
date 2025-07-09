@@ -42,7 +42,7 @@ class Config:
     action_dim: int = 2  # 2 for sine (mean, std), 2 for cosine (mean, std)
     
     # PPO hyperparameters
-    learning_rate: float = 3e-4
+    learning_rate: float = 3e-3
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
@@ -54,8 +54,8 @@ class Config:
     batch_size: int = 64
     mini_batch_size: int = 16
     ppo_epochs: int = 4
-    n_envs: int = 8
-    n_steps: int = 128
+    n_envs: int = 1
+    n_steps: int = 720
     total_timesteps: int = 1_000_000
     
     # Logging
@@ -134,7 +134,7 @@ class ImagePreprocessor(nn.Module):
         
         # Convert from [..., H, W, C] to [..., C, H, W]
         x = x.permute(*range(len(x.shape) - 3), -1, -3, -2)
-        
+
         # Apply ImageNet normalization
         x = (x - self.mean) / self.std
         
@@ -198,20 +198,20 @@ class ViNTActorCritic(nn.Module):
         
         # Split the action logits into mean and log_std
         # We interpret the spread on log scale, so we can exponentiate it and therefore guarantee positive values
-        sin_mean, sin_log_std, cos_mean, cos_log_std = torch.chunk(action_logits, 4, dim=-1)
-        sin_std = torch.exp(sin_log_std.clamp(-5, 2))
+        cos_mean, sin_mean, cos_log_std, sin_log_std = torch.chunk(action_logits, 4, dim=-1)
         cos_std = torch.exp(cos_log_std.clamp(-5, 2))
+        sin_std = torch.exp(sin_log_std.clamp(-5, 2))
         
         # Create action distributions
-        sin_action_distribution = torch.distributions.Normal(sin_mean, sin_std)
         cos_action_distribution = torch.distributions.Normal(cos_mean, cos_std)
+        sin_action_distribution = torch.distributions.Normal(sin_mean, sin_std)
 
         # Sample from the action distributions
-        sin_action = sin_action_distribution.sample()
         cos_action = cos_action_distribution.sample()
+        sin_action = sin_action_distribution.sample()
 
         # Combine the actions
-        action = torch.cat([sin_action, cos_action], dim=-1)
+        action = torch.cat([cos_action, sin_action], dim=-1)
 
         # Calculate log probabilities
         sin_log_prob = sin_action_distribution.log_prob(sin_action).sum(dim=-1)
@@ -362,7 +362,7 @@ class PPOTrainer:
         for env in self.envs:
             obs, info = env.reset()
             observations.append(obs)
-        observations = torch.FloatTensor(np.array(observations)).to(self.device) # [n_env, seq_len, height, width, n_channels]
+        observations = torch.from_numpy(np.array(observations)) # [n_env, seq_len, height, width, n_channels]
         
         # Track episode metrics
         episode_rewards = [0] * self.config.n_envs
@@ -370,7 +370,7 @@ class PPOTrainer:
         
         for step in range(self.config.n_steps):
             with torch.no_grad():
-                actions, logprobs, entropy, values = self.model.get_action_and_value(observations)
+                actions, logprobs, entropy, values = self.model.get_action_and_value(observations.to(self.device))
             
             # Take actions in environments
             next_observations = []
@@ -406,7 +406,7 @@ class PPOTrainer:
                 values.cpu().squeeze()
             )
             
-            observations = torch.FloatTensor(np.array(next_observations)).to(self.device)
+            observations = torch.from_numpy(np.array(next_observations))
             self.global_step += self.config.n_envs
     
     def update_policy(self):
