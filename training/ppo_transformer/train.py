@@ -42,7 +42,7 @@ class Config:
     action_dim: int = 2  # 2 for sine (mean, std), 2 for cosine (mean, std)
     
     # PPO hyperparameters
-    learning_rate: float = 3e-3
+    learning_rate: float = 3e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
@@ -60,8 +60,8 @@ class Config:
     
     # Logging
     log_interval: int = 10
-    save_interval: int = 100
-    eval_interval: int = 50
+    save_interval: int = 20
+    eval_interval: int = 20
     log_dir: str = "logs/tensorboard"
 
 
@@ -106,9 +106,10 @@ class MultiLayerDecoder(nn.Module):
         x = self.sa_decoder(x)
         # currently, x is [batch_size, seq_len, embed_dim]
         x = x.reshape(x.shape[0], -1) # Now x is [batch_size, seq_len * embed_dim]
-        for i in range(len(self.output_layers)):
-            x = self.output_layers[i](x)
-            x = F.relu(x)
+        for i, layer in enumerate(self.output_layers):
+            x = layer(x)
+            if i != len(self.output_layers) - 1: # Don't apply relu to the last layer
+                x = F.relu(x)
         return x
     
 
@@ -206,19 +207,31 @@ class ViNTActorCritic(nn.Module):
         cos_action_distribution = torch.distributions.Normal(cos_mean, cos_std)
         sin_action_distribution = torch.distributions.Normal(sin_mean, sin_std)
 
-        # Sample from the action distributions
-        cos_action = cos_action_distribution.sample()
-        sin_action = sin_action_distribution.sample()
+        # Sample from the action distributions (raw actions before squashing)
+        cos_action_raw = cos_action_distribution.sample()
+        sin_action_raw = sin_action_distribution.sample()
 
-        # Combine the actions
+        # Apply tanh squashing to ensure actions are in [-1, 1]
+        cos_action = torch.tanh(cos_action_raw)
+        sin_action = torch.tanh(sin_action_raw)
+
+        # Combine the squashed actions
         action = torch.cat([cos_action, sin_action], dim=-1)
 
-        # Calculate log probabilities
-        sin_log_prob = sin_action_distribution.log_prob(sin_action).sum(dim=-1)
-        cos_log_prob = cos_action_distribution.log_prob(cos_action).sum(dim=-1)
+        # Calculate log probabilities with tanh correction
+        # log_prob = log_prob_raw - log(1 - tanh^2(raw_action))
+        sin_log_prob_raw = sin_action_distribution.log_prob(sin_action_raw).sum(dim=-1)
+        cos_log_prob_raw = cos_action_distribution.log_prob(cos_action_raw).sum(dim=-1)
+        
+        # Tanh correction term
+        sin_tanh_correction = torch.log(1 - torch.tanh(sin_action_raw)**2 + 1e-6).sum(dim=-1)
+        cos_tanh_correction = torch.log(1 - torch.tanh(cos_action_raw)**2 + 1e-6).sum(dim=-1)
+        
+        sin_log_prob = sin_log_prob_raw - sin_tanh_correction
+        cos_log_prob = cos_log_prob_raw - cos_tanh_correction
         total_log_prob = sin_log_prob + cos_log_prob
 
-        # Calculate entropy
+        # Calculate entropy (note: entropy changes due to tanh transformation)
         sin_entropy = sin_action_distribution.entropy().sum(dim=-1)
         cos_entropy = cos_action_distribution.entropy().sum(dim=-1)
         entropy = sin_entropy + cos_entropy
@@ -231,15 +244,45 @@ class ViNTActorCritic(nn.Module):
     def evaluate_actions(self, obs, actions):
        """
        obs: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
-       actions: tensor of shape [batch_size, seq_len, action_dim]
+       actions: tensor of shape [batch_size, action_dim] - these are the squashed actions in [-1, 1]
        """
        logits, value = self.forward(obs)
-       mean, log_std = logits[:, :2], logits[:, 2:]
-       log_std = torch.clamp(log_std, -5, 2)
-       std = torch.exp(log_std)
-       dist = Normal(mean, std)
-       log_prob = dist.log_prob(actions).sum(-1)
-       entropy   = dist.entropy().sum(-1)
+       cos_mean, sin_mean, cos_log_std, sin_log_std = torch.chunk(logits, 4, dim=-1)
+       cos_std = torch.exp(cos_log_std.clamp(-5, 2))
+       sin_std = torch.exp(sin_log_std.clamp(-5, 2))
+       
+       # Create distributions for raw (unsquashed) actions
+       cos_dist = Normal(cos_mean, cos_std)
+       sin_dist = Normal(sin_mean, sin_std)
+       
+       # Convert squashed actions back to raw actions using inverse tanh
+       cos_action_squashed = actions[:, 0:1]
+       sin_action_squashed = actions[:, 1:2]
+       
+       # Clamp to avoid numerical issues with atanh
+       cos_action_squashed = torch.clamp(cos_action_squashed, -0.999999, 0.999999)
+       sin_action_squashed = torch.clamp(sin_action_squashed, -0.999999, 0.999999)
+       
+       cos_action_raw = torch.atanh(cos_action_squashed)
+       sin_action_raw = torch.atanh(sin_action_squashed)
+       
+       # Calculate log probabilities for raw actions
+       cos_log_prob_raw = cos_dist.log_prob(cos_action_raw).sum(-1)
+       sin_log_prob_raw = sin_dist.log_prob(sin_action_raw).sum(-1)
+       
+       # Apply tanh correction
+       cos_tanh_correction = torch.log(1 - cos_action_squashed**2 + 1e-6).sum(-1)
+       sin_tanh_correction = torch.log(1 - sin_action_squashed**2 + 1e-6).sum(-1)
+       
+       cos_log_prob = cos_log_prob_raw - cos_tanh_correction
+       sin_log_prob = sin_log_prob_raw - sin_tanh_correction
+       log_prob = cos_log_prob + sin_log_prob
+       
+       # Calculate entropy
+       cos_entropy = cos_dist.entropy().sum(-1)
+       sin_entropy = sin_dist.entropy().sum(-1)
+       entropy = cos_entropy + sin_entropy
+       
        return log_prob, entropy, value.squeeze(-1)
     
 
@@ -555,7 +598,7 @@ class PPOTrainer:
                 
                 # Save model
                 if iteration % self.config.save_interval == 0:
-                    torch.save(self.model.state_dict(), f"snake_ppo_model_{iteration}.pth")
+                    torch.save(self.model.state_dict(), f"snake_ppo_model_{iteration}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth")
         
         except KeyboardInterrupt:
             print("Training interrupted by user")
