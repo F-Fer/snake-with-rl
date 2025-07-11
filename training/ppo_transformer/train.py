@@ -32,6 +32,10 @@ class RolloutBuffer:
         
         self.ptr = 0
         self.full = False
+
+        # Value predictions for the observation that follows the final action of the rollout.
+        # Shape: [n_envs]
+        self.last_values = torch.zeros(n_envs)
     
     def add(self, obs, action, logprob, reward, done, value):
         self.observations[self.ptr] = obs
@@ -45,15 +49,20 @@ class RolloutBuffer:
         if self.ptr == 0:
             self.full = True
     
+    def set_last_values(self, last_values: torch.Tensor):
+        """Store value predictions for the observations that follow the last action in the rollout."""
+        self.last_values = last_values.clone()
+
     def get(self, device):
-        """Get all data and compute advantages"""
+        """Get all data and compute advantages using the stored last_values for boot-strapping."""
         # Calculate advantages using GAE
         advantages = torch.zeros_like(self.rewards)
         last_advantage = 0
         
         for t in reversed(range(self.n_steps)):
             if t == self.n_steps - 1:
-                next_value = 0  # Assuming episode ends
+                # Bootstrap with the value prediction of the observation following the last action
+                next_value = self.last_values
             else:
                 next_value = self.values[t + 1]
             
@@ -167,6 +176,14 @@ class PPOTrainer:
             
             observations = torch.from_numpy(np.array(next_observations))
             self.global_step += self.config.n_envs
+
+        # After collecting the rollout, compute the value prediction for the observations that follow the
+        # final action. These are used to bootstrap the Generalised Advantage Estimation (GAE).
+        with torch.no_grad():
+            _, _, _, next_values = self.model.get_action_and_value(observations.to(self.device))
+
+        # Store on CPU for the buffer (shape: [n_envs])
+        self.buffer.set_last_values(next_values.cpu().squeeze())
     
     def update_policy(self):
         """Update policy using PPO"""
