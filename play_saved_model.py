@@ -9,45 +9,53 @@ import numpy as np
 import torch
 import pygame
 
-from training.ppo_transformer.train import Config, ViNTActorCritic
+from training.ppo_transformer.lib.config import Config
+from training.ppo_transformer.lib.model import ViNTActorCritic
+from training.ppo_transformer.lib.env_wrappers import make_env
 from snake_env.envs.snake_env import SnakeEnv
 
 
 def preprocess_frame(frame: np.ndarray, output_size: tuple[int, int]) -> np.ndarray:
     """Resize the raw RGB frame to the (H, W) needed for the model."""
-    # OpenCV expects (W, H) when giving size
+    # Keep uint8 dtype so that the model's ImagePreprocessor handles the conversion
     resized = cv2.resize(frame, output_size[::-1], interpolation=cv2.INTER_AREA)
-    return resized.astype(np.float32)
+    return resized  # dtype remains np.uint8
 
 
 def rollout(env: SnakeEnv, model: ViNTActorCritic, device: torch.device, cfg: Config, video_path: str):
-    """Play a single episode using the trained model and save it to *video_path*."""
+    """Play a single episode using the trained model and save it to *video_path*.
+
+    The key here is to feed the model **exactly** the same observation format that was
+    used during training:
+        *  uint8 dtype
+        *  shape (frame_stack, H, W, C) before adding the batch dimension
+        *  resized via the ResizeObservation wrapper that is already applied in
+           `make_env`
+    """
+
     writer = imageio.get_writer(video_path, fps=30)
 
-    obs, _ = env.reset()
-    # Initialise frame stack with the first observation resized
-    processed = preprocess_frame(obs, (cfg.output_height, cfg.output_width))
-    frame_stack = deque([processed for _ in range(cfg.frame_stack)], maxlen=cfg.frame_stack)
+    # Reset environment – `obs` is already stacked & resized by the wrappers
+    obs, _ = env.reset()  # shape: (frame_stack, H, W, C) – dtype: uint8
 
     done, truncated = False, False
     while not (done or truncated):
-        # Prepare stacked observation for the model -> shape (1, stack, H, W, C)
-        stacked_obs = np.stack(list(frame_stack), axis=0)
-        stacked_obs = torch.tensor(stacked_obs, dtype=torch.float32).unsqueeze(0).to(device)
+        # Convert to tensor keeping uint8 so that the model's ImagePreprocessor
+        # performs the uint8 → float conversion exactly like during training.
+        obs_tensor = torch.tensor(obs, dtype=torch.uint8).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            action, _, _, _ = model.get_action_and_value(stacked_obs)
-        action_np = action.squeeze(0).cpu().numpy()
+            action, _, _, _ = model.get_action_and_value(obs_tensor)
 
+        # Execute action in the environment
+        action_np = action.squeeze(0).cpu().numpy()
         obs, _, done, truncated, _ = env.step(action_np)
 
-        # Render high-resolution frame for video recording
-        frame = env._render_frame()
+        # Render high-resolution frame for the output video (does not affect the
+        # model pipeline).
+        # Use the underlying SnakeEnv's high-resolution render method
+        frame = env.unwrapped._render_frame()
         writer.append_data(frame)
-
-        # Update frame stack
-        processed = preprocess_frame(frame, (cfg.output_height, cfg.output_width))
-        frame_stack.append(processed)
 
     writer.close()
 
@@ -72,7 +80,8 @@ def main():
     model.eval()
 
     # Build environment (match training resolution, but we will down-sample for the model)
-    env = SnakeEnv(screen_width=cfg.frame_width, screen_height=cfg.frame_height, zoom_level=1.0)
+    env = make_env(cfg)()
+    print(env)
 
     for ep in range(args.num_rollouts):
         print(f"Starting rollout {ep + 1}/{args.num_rollouts} …")
