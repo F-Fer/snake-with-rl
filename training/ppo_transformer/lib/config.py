@@ -10,6 +10,7 @@ class Config:
     # Environment
     n_channels: int = 3
     frame_stack: int = 5  # N frames to stack
+    frame_skip: int = 4  # Repeat each action for this many frames
     frame_width: int = 680 # output_width * 8
     frame_height: int = 512 # output_height * 8
     
