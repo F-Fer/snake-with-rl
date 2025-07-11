@@ -47,7 +47,8 @@ class MultiLayerDecoder(nn.Module):
             in_features = out_features
 
     def forward(self, x):
-        if self.positional_encoding: x = self.positional_encoding(x)
+        # Always apply positional encoding; avoid boolean check on nn.Module
+        x = self.positional_encoding(x)
         x = self.sa_decoder(x)
         # currently, x is [batch_size, seq_len, embed_dim]
         x = x[:, -1, :] # Now x is [batch_size, embed_dim]

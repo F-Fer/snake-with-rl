@@ -38,7 +38,14 @@ class RolloutBuffer:
         self.last_values = torch.zeros(n_envs)
     
     def add(self, obs, action, logprob, reward, done, value):
-        self.observations[self.ptr] = obs
+        # Ensure observations are stored as uint8 (0-255) regardless of input dtype
+        if obs.dtype == torch.uint8:
+            obs_uint8 = obs
+        else:
+            # Assume observations are in the range [0, 1] if floating point
+            obs_uint8 = torch.clamp((obs * 255.0).round(), 0, 255).to(torch.uint8)
+
+        self.observations[self.ptr] = obs_uint8
         self.actions[self.ptr] = action
         self.logprobs[self.ptr] = logprob
         self.rewards[self.ptr] = reward
