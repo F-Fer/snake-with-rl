@@ -43,6 +43,7 @@ class RolloutBuffer:
         if obs.dtype == torch.uint8:
             obs_uint8 = obs
         else:
+            print("Observations are not uint8")
             # Assume observations are in the range [0, 1] if floating point
             obs_uint8 = torch.clamp((obs * 255.0).round(), 0, 255).to(torch.uint8)
 
@@ -81,7 +82,7 @@ class RolloutBuffer:
         returns = advantages + self.values
         
         # Flatten batch dimensions and convert observations back to float32
-        b_obs = self.observations.flatten(0, 1).to(device).float() / 255.0
+        b_obs = self.observations.flatten(0, 1).to(device)
         b_actions = self.actions.flatten(0, 1).to(device)
         b_logprobs = self.logprobs.flatten(0, 1).to(device)
         b_advantages = advantages.flatten(0, 1).to(device)
@@ -229,7 +230,11 @@ class PPOTrainer:
                 
                 # Calculate losses
                 logratio = newlogprob - mb_logprobs
-                ratio = logratio.exp()
+                # Clamp the log-ratio to a reasonable range before exponentiating to
+                # avoid numerical overflow which can propagate NaNs through the loss
+                # computation and corrupt the network weights.
+                logratio_clamped = logratio.clamp(-10.0, 10.0)
+                ratio = logratio_clamped.exp()
                 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio

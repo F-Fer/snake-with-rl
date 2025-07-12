@@ -4,6 +4,7 @@ import math
 import torch.nn as nn
 import gymnasium as gym
 from training.ppo_transformer.lib.config import Config
+from torch.distributions import TransformedDistribution, TanhTransform, Independent, Normal
 
 HID_SIZE = 256
 
@@ -141,15 +142,9 @@ class SimpleModel(nn.Module):
             nn.Dropout(self.config.dropout),
         )
 
-        self.actor = nn.Sequential(
-            nn.Tanh(),
-            nn.Linear(HID_SIZE, 2 * self.config.action_dim) # 2 for sine and cosine
-        )
+        self.actor = nn.Linear(HID_SIZE, 2 * self.config.action_dim)  # Outputs for means and log_stds (unbounded)
 
-        self.critic = nn.Sequential(
-            nn.Tanh(),
-            nn.Linear(HID_SIZE, 1)
-        )
+        self.critic = nn.Linear(HID_SIZE, 1)  # Unbounded value output
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -167,93 +162,46 @@ class SimpleModel(nn.Module):
         """
         x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
         """
-        action_logits, value = self.forward(x) # [batch_size, 4]
+        action_logits, value = self.forward(x)
         
-        # Split the action logits into mean and log_std
-        # We interpret the spread on log scale, so we can exponentiate it and therefore guarantee positive values
-        cos_mean, sin_mean, cos_log_std, sin_log_std = torch.chunk(action_logits, 4, dim=-1)
-        cos_std = torch.exp(cos_log_std.clamp(-5, 2))
-        sin_std = torch.exp(sin_log_std.clamp(-5, 2))
-
-        # Create action distributions
-        cos_action_distribution = torch.distributions.Normal(cos_mean, cos_std)
-        sin_action_distribution = torch.distributions.Normal(sin_mean, sin_std)
-
-        # Sample from the action distributions (raw actions before squashing)
-        cos_action_raw = cos_action_distribution.sample()
-        sin_action_raw = sin_action_distribution.sample()
-
-        # Apply tanh squashing to ensure actions are in [-1, 1]
-        cos_action = torch.tanh(cos_action_raw)
-        sin_action = torch.tanh(sin_action_raw)
-
-        # Combine the squashed actions
-        action = torch.cat([cos_action, sin_action], dim=-1)
-
-        # Calculate log probabilities with tanh correction
-        # log_prob = log_prob_raw - log(1 - tanh^2(raw_action))
-        sin_log_prob_raw = sin_action_distribution.log_prob(sin_action_raw).sum(dim=-1)
-        cos_log_prob_raw = cos_action_distribution.log_prob(cos_action_raw).sum(dim=-1)
+        means = action_logits[:, :self.config.action_dim]
+        log_stds = action_logits[:, self.config.action_dim:]
+        stds = torch.exp(log_stds.clamp(-5, 2))
         
-        # Tanh correction term
-        sin_tanh_correction = torch.log(1 - torch.tanh(sin_action_raw)**2 + 1e-6).sum(dim=-1)
-        cos_tanh_correction = torch.log(1 - torch.tanh(cos_action_raw)**2 + 1e-6).sum(dim=-1)
+        base_dist = Independent(Normal(means, stds), 1)
+        squashed_dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
         
-        sin_log_prob = sin_log_prob_raw - sin_tanh_correction
-        cos_log_prob = cos_log_prob_raw - cos_tanh_correction
-        total_log_prob = sin_log_prob + cos_log_prob
-
-        # Calculate entropy (note: entropy changes due to tanh transformation)
-        sin_entropy = sin_action_distribution.entropy().sum(dim=-1)
-        cos_entropy = cos_action_distribution.entropy().sum(dim=-1)
-        entropy = sin_entropy + cos_entropy
-
-        # Calculate value
+        action = squashed_dist.sample()
+        log_prob = squashed_dist.log_prob(action)
+        entropy = base_dist.entropy()
+        
         value = value.squeeze()
-            
-        return action, total_log_prob, entropy, value
+        
+        return action, log_prob, entropy, value
     
     def evaluate_actions(self, x, actions):
-       """
-       x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
-       actions: tensor of shape [batch_size, action_dim] - these are the squashed actions in [-1, 1]
-       """
-       logits, value = self.forward(x)
-       cos_mean, sin_mean, cos_log_std, sin_log_std = torch.chunk(logits, 4, dim=-1)
-       cos_std = torch.exp(cos_log_std.clamp(-5, 2))
-       sin_std = torch.exp(sin_log_std.clamp(-5, 2))
-       
-       # Create distributions for raw (unsquashed) actions
-       cos_dist = torch.distributions.Normal(cos_mean, cos_std)
-       sin_dist = torch.distributions.Normal(sin_mean, sin_std)
-       
-       # Convert squashed actions back to raw actions using inverse tanh
-       cos_action_squashed = actions[:, 0:1]
-       sin_action_squashed = actions[:, 1:2]
-       
-       # Clamp to avoid numerical issues with atanh
-       cos_action_squashed = torch.clamp(cos_action_squashed, -0.999999, 0.999999)
-       sin_action_squashed = torch.clamp(sin_action_squashed, -0.999999, 0.999999)
-       
-       cos_action_raw = torch.atanh(cos_action_squashed)
-       sin_action_raw = torch.atanh(sin_action_squashed)
-       
-       # Calculate log probabilities for raw actions
-       cos_log_prob_raw = cos_dist.log_prob(cos_action_raw).sum(-1)
-       sin_log_prob_raw = sin_dist.log_prob(sin_action_raw).sum(-1)
-       
-       # Apply tanh correction
-       cos_tanh_correction = torch.log(1 - cos_action_squashed**2 + 1e-6).sum(-1)
-       sin_tanh_correction = torch.log(1 - sin_action_squashed**2 + 1e-6).sum(-1)
-       
-       cos_log_prob = cos_log_prob_raw - cos_tanh_correction
-       sin_log_prob = sin_log_prob_raw - sin_tanh_correction
-       log_prob = cos_log_prob + sin_log_prob
-       
-       # Calculate entropy
-       cos_entropy = cos_dist.entropy().sum(-1)
-       sin_entropy = sin_dist.entropy().sum(-1)
-       entropy = cos_entropy + sin_entropy
-       
-       return log_prob, entropy, value.squeeze(-1)
+        """
+        x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
+        actions: tensor of shape [batch_size, action_dim] - squashed actions in [-1, 1]
+        """
+        logits, value = self.forward(x)
+
+        means = logits[:, :self.config.action_dim]
+        log_stds = logits[:, self.config.action_dim:]
+        stds = torch.exp(log_stds.clamp(-5, 2))
+
+        base_dist = Independent(Normal(means, stds), 1)
+        squashed_dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
+
+        # Clamp actions slightly inside the open interval (-1, 1) to avoid numerical
+        # instabilities when computing the inverse tanh in log_prob. Actions that hit
+        # exactly the boundaries yield +/-inf after atanh which in turn produces NaNs
+        # in the subsequent computations and can corrupt the network weights.
+        eps = 1e-6
+        actions_clamped = actions.clamp(-1 + eps, 1 - eps)
+
+        log_prob = squashed_dist.log_prob(actions_clamped)
+        entropy = base_dist.entropy()
+
+        return log_prob, entropy, value.squeeze(-1)
 

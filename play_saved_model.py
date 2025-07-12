@@ -11,6 +11,7 @@ import pygame
 
 from training.ppo_transformer.lib.config import Config
 from training.ppo_transformer.lib.model import ViNTActorCritic
+from training.ppo_transformer.lib.simple_model import SimpleModel
 from training.ppo_transformer.lib.env_wrappers import make_env
 from snake_env.envs.snake_env import SnakeEnv
 
@@ -22,7 +23,7 @@ def preprocess_frame(frame: np.ndarray, output_size: tuple[int, int]) -> np.ndar
     return resized  # dtype remains np.uint8
 
 
-def rollout(env: SnakeEnv, model: ViNTActorCritic, device: torch.device, cfg: Config, video_path: str):
+def rollout(env: SnakeEnv, model: torch.nn.Module, device: torch.device, cfg: Config, video_path: str):
     """Play a single episode using the trained model and save it to *video_path*.
 
     The key here is to feed the model **exactly** the same observation format that was
@@ -75,7 +76,8 @@ def main():
     cfg = Config()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ViNTActorCritic(cfg).to(device)
+    # model = ViNTActorCritic(cfg).to(device)
+    model = SimpleModel(cfg).to(device)
     model.load_state_dict(torch.load(args.model, map_location=device))
     model.eval()
 
