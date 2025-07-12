@@ -16,8 +16,8 @@ class Config:
     
     # Model architecture (adapted from ViNT)
     d_model: int = 512
-    n_heads: int = 4
-    n_layers: int = 4
+    n_heads: int = 8
+    n_layers: int = 8
     d_ff: int = 2048
     dropout: float = 0.1
     output_layers: list[int] = field(default_factory=lambda: [256, 128, 64, 32])

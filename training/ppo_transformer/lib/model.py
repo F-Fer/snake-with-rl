@@ -34,10 +34,10 @@ class PositionalEncoding(nn.Module):
     
 
 class MultiLayerDecoder(nn.Module):
-    def __init__(self, embed_dim=512, seq_len=6, output_layers=[256, 128, 64], nhead=8, num_layers=8, ff_dim_factor=4):
+    def __init__(self, embed_dim=512, seq_len=6, output_layers=[256, 128, 64], nhead=8, num_layers=8, dropout=0.1, ff_dim_factor=4):
         super(MultiLayerDecoder, self).__init__()
         self.positional_encoding = PositionalEncoding(embed_dim, max_seq_len=seq_len)
-        self.sa_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=nhead, dim_feedforward=ff_dim_factor*embed_dim, activation="gelu", batch_first=True, norm_first=True)
+        self.sa_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=nhead, dim_feedforward=ff_dim_factor*embed_dim, activation="gelu", batch_first=True, norm_first=True, dropout=dropout)
         self.sa_decoder = nn.TransformerEncoder(self.sa_layer, num_layers=num_layers)
         
         self.output_layers = nn.ModuleList()
@@ -100,10 +100,10 @@ class ViNTActorCritic(nn.Module):
         self.efficientnet = EfficientNet.from_pretrained('efficientnet-b0', in_channels=config.n_channels)
 
         # Initialize the transformer backnbone
-        self.transformer_decoder = MultiLayerDecoder(embed_dim=config.d_model, seq_len=config.frame_stack, output_layers=config.output_layers)
+        self.transformer_decoder = MultiLayerDecoder(embed_dim=config.d_model, seq_len=config.frame_stack, output_layers=config.output_layers, nhead=config.n_heads, num_layers=config.n_layers, dropout=config.dropout)
 
         # Adapter to go from the output of the convnet to the input d_model of the transformer
-        self.adapter = nn.Linear(1280, config.d_model) # TODO: change this to the output of the convnet dynamically or smt
+        self.adapter = nn.Linear(self.efficientnet._fc.in_features, config.d_model) # 1280 to d_model
 
         # Initialize the actor and critic networks
         self.actor = nn.Linear(config.output_layers[-1], config.action_dim * 2) # 2 for sine and cosine
