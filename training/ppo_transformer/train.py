@@ -9,6 +9,7 @@ from typing import Tuple
 
 from training.ppo_transformer.lib.config import Config
 from training.ppo_transformer.lib.model import ViNTActorCritic
+from training.ppo_transformer.lib.simple_model import SimpleModel
 from training.ppo_transformer.lib.env_wrappers import make_env
     
 
@@ -110,7 +111,8 @@ class PPOTrainer:
         self.envs = [make_env(config)() for _ in range(config.n_envs)]
         
         # Initialize model
-        self.model = ViNTActorCritic(config).to(self.device)
+        # self.model = ViNTActorCritic(config).to(self.device)
+        self.model = SimpleModel(config).to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=config.learning_rate)
         
         # Initialize buffer
