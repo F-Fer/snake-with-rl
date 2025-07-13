@@ -35,15 +35,14 @@ class Config:
     max_grad_norm: float = 0.5
     
     # Training
-    batch_size: int = 64
-    mini_batch_size: int = 16
+    mini_batch_size: int = 64
     ppo_epochs: int = 4
     n_envs: int = 1
-    n_steps: int = 720
+    n_steps: int = 8_192
     total_timesteps: int = 1_000_000
     
     # Logging
-    log_interval: int = 10
+    log_interval: int = 2
     save_interval: int = 20
     eval_interval: int = 20
     log_dir: str = "logs/tensorboard"

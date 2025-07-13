@@ -43,7 +43,6 @@ class RolloutBuffer:
         if obs.dtype == torch.uint8:
             obs_uint8 = obs
         else:
-            print("Observations are not uint8")
             # Assume observations are in the range [0, 1] if floating point
             obs_uint8 = torch.clamp((obs * 255.0).round(), 0, 255).to(torch.uint8)
 
@@ -98,7 +97,7 @@ class RolloutBuffer:
 class PPOTrainer:
     """PPO Trainer for Snake Environment"""
     
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, model: torch.nn.Module):
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
@@ -110,10 +109,10 @@ class PPOTrainer:
         
         # Create environments
         self.envs = [make_env(config)() for _ in range(config.n_envs)]
+
+        self.model = model.to(self.device)
         
-        # Initialize model
-        # self.model = ViNTActorCritic(config).to(self.device)
-        self.model = SimpleModel(config).to(self.device)
+        # Initialize optimizer
         self.optimizer = optim.Adam(self.model.parameters(), lr=config.learning_rate)
         
         # Initialize buffer
@@ -145,6 +144,8 @@ class PPOTrainer:
         # Track episode metrics
         episode_rewards = [0] * self.config.n_envs
         episode_lengths = [0] * self.config.n_envs
+
+        self.model.eval()
         
         for step in range(self.config.n_steps):
             with torch.no_grad():
@@ -192,6 +193,8 @@ class PPOTrainer:
         with torch.no_grad():
             _, _, _, next_values = self.model.get_action_and_value(observations.to(self.device))
 
+        self.model.train()
+
         # Store on CPU for the buffer (shape: [n_envs])
         self.buffer.set_last_values(next_values.cpu().squeeze())
     
@@ -206,6 +209,8 @@ class PPOTrainer:
         epoch_total_losses = []
         epoch_clip_fractions = []
         epoch_explained_variances = []
+
+        self.model.train()
         
         # Training loop
         for epoch in range(self.config.ppo_epochs):
@@ -356,24 +361,26 @@ class PPOTrainer:
 
 def main():
     parser = argparse.ArgumentParser(description="PPO Training for Snake Environment")
-    parser.add_argument("--total_timesteps", type=int, default=1000000)
-    parser.add_argument("--learning_rate", type=float, default=3e-4)
-    parser.add_argument("--n_envs", type=int, default=8)
-    parser.add_argument("--frame_stack", type=int, default=5)
     parser.add_argument("--log_dir", type=str, default="logs/tensorboard")
+    parser.add_argument("--model", type=str, default=None)
     
     args = parser.parse_args()
     
     # Create config
     config = Config()
-    config.total_timesteps = args.total_timesteps
-    config.learning_rate = args.learning_rate
-    config.n_envs = args.n_envs
-    config.frame_stack = args.frame_stack
     config.log_dir = args.log_dir
+
+    # model = SimpleModel(config)
+    model = ViNTActorCritic(config)
+    if args.model is not None:
+        try:
+            model.load_state_dict(torch.load(args.model, weights_only=True))
+            print(f"Loaded model from {args.model}")
+        except Exception as e:
+            print(f"Error loading model: {e}")
     
     # Initialize trainer
-    trainer = PPOTrainer(config)
+    trainer = PPOTrainer(config, model)
     
     # Start training
     print("Starting PPO training...")
