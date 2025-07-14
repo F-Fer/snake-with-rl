@@ -104,8 +104,12 @@ class PPOTrainer:
         # Setup TensorBoard logging
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_dir = os.path.join(config.log_dir, f"snake_ppo_{timestamp}")
-        os.makedirs(log_dir, exist_ok=True)
         self.writer = SummaryWriter(log_dir)
+        # Log config
+        self.writer.add_text(
+            "hyperparameters",
+            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(config).items()])),
+        )
         
         # Create environments
         self.envs = [make_env(config)() for _ in range(config.n_envs)]
@@ -113,7 +117,7 @@ class PPOTrainer:
         self.model = model.to(self.device)
         
         # Initialize optimizer
-        self.optimizer = optim.Adam(self.model.parameters(), lr=config.learning_rate)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=config.learning_rate, eps=1e-5)
         
         # Initialize buffer
         obs_shape = (config.frame_stack, config.output_height, config.output_width, config.n_channels)
