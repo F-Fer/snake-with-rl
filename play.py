@@ -6,8 +6,8 @@ import math
 import numpy as np
 
 def play_snake():
-    display_width = 720  
-    display_height = 480
+    display_width = 448  
+    display_height = 448
 
     env = gym.make('Snake-v0', screen_width=display_width, screen_height=display_height)
 

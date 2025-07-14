@@ -81,12 +81,12 @@ class RolloutBuffer:
         returns = advantages + self.values
         
         # Flatten batch dimensions and convert observations back to float32
-        b_obs = self.observations.flatten(0, 1).to(device)
-        b_actions = self.actions.flatten(0, 1).to(device)
-        b_logprobs = self.logprobs.flatten(0, 1).to(device)
-        b_advantages = advantages.flatten(0, 1).to(device)
-        b_returns = returns.flatten(0, 1).to(device)
-        b_values = self.values.flatten(0, 1).to(device)
+        b_obs = self.observations.flatten(0, 1)
+        b_actions = self.actions.flatten(0, 1)
+        b_logprobs = self.logprobs.flatten(0, 1)
+        b_advantages = advantages.flatten(0, 1)
+        b_returns = returns.flatten(0, 1)
+        b_values = self.values.flatten(0, 1)
         
         # Normalize advantages
         b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
@@ -223,12 +223,12 @@ class PPOTrainer:
                 mb_indices = indices[start:end]
                 
                 # Get mini-batch data
-                mb_obs = b_obs[mb_indices]
-                mb_actions = b_actions[mb_indices] 
-                mb_logprobs = b_logprobs[mb_indices]
-                mb_advantages = b_advantages[mb_indices]
-                mb_returns = b_returns[mb_indices]
-                mb_values = b_values[mb_indices]
+                mb_obs = b_obs[mb_indices].to(self.device)
+                mb_actions = b_actions[mb_indices].to(self.device)
+                mb_logprobs = b_logprobs[mb_indices].to(self.device)
+                mb_advantages = b_advantages[mb_indices].to(self.device)
+                mb_returns = b_returns[mb_indices].to(self.device)
+                mb_values = b_values[mb_indices].to(self.device)
                 
                 # Forward pass
                 newlogprob, entropy, newvalue = self.model.evaluate_actions(mb_obs, mb_actions)
