@@ -142,11 +142,22 @@ class SimpleModel(nn.Module):
             nn.Dropout(self.config.dropout),
         )
 
-        self.actor = nn.Linear(HID_SIZE, 2 * self.config.action_dim)  # Outputs for means and log_stds (unbounded)
-
+        self.actor_mean = nn.Sequential(
+            nn.Tanh(),
+            nn.Linear(HID_SIZE, self.config.action_dim)
+        )  # Outputs for means
+        self.actor_logstd = nn.Parameter(torch.zeros(1, self.config.action_dim)) # Outputs for log_stds (unbounded)
         self.critic = nn.Linear(HID_SIZE, 1)  # Unbounded value output
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    
+    def get_value(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
+        """
+        x = self.image_preprocessor(x)
+        x = self.net(x)
+        return self.critic(x)
+    
+    def get_action_and_value(self, x: torch.Tensor, action: torch.Tensor = None) -> torch.Tensor:
         """
         x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
         """
@@ -156,52 +167,20 @@ class SimpleModel(nn.Module):
             
         # Feed through network
         x = self.net(x)
-        return self.actor(x), self.critic(x)
-    
-    def get_action_and_value(self, x):
-        """
-        x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
-        """
-        action_logits, value = self.forward(x)
-        
-        means = action_logits[:, :self.config.action_dim]
-        log_stds = action_logits[:, self.config.action_dim:]
-        stds = torch.exp(log_stds.clamp(-5, 2))
-        
-        base_dist = Independent(Normal(means, stds), 1)
-        squashed_dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
-        
-        action = squashed_dist.sample()
-        log_prob = squashed_dist.log_prob(action)
-        entropy = base_dist.entropy()
-        
-        value = value.squeeze()
-        
-        return action, log_prob, entropy, value
-    
-    def evaluate_actions(self, x, actions):
-        """
-        x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
-        actions: tensor of shape [batch_size, action_dim] - squashed actions in [-1, 1]
-        """
-        logits, value = self.forward(x)
 
-        means = logits[:, :self.config.action_dim]
-        log_stds = logits[:, self.config.action_dim:]
-        stds = torch.exp(log_stds.clamp(-5, 2))
+        # Get action mean
+        action_mean = self.actor_mean(x)
 
-        base_dist = Independent(Normal(means, stds), 1)
-        squashed_dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
+        # Get action logstd (state independent)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
 
-        # Clamp actions slightly inside the open interval (-1, 1) to avoid numerical
-        # instabilities when computing the inverse tanh in log_prob. Actions that hit
-        # exactly the boundaries yield +/-inf after atanh which in turn produces NaNs
-        # in the subsequent computations and can corrupt the network weights.
-        eps = 1e-6
-        actions_clamped = actions.clamp(-1 + eps, 1 - eps)
+        # Create normal distribution
+        probs = Normal(action_mean, action_std)
 
-        log_prob = squashed_dist.log_prob(actions_clamped)
-        entropy = base_dist.entropy()
+        # Sample action if not provided
+        if action is None:
+            action = probs.sample()
 
-        return log_prob, entropy, value.squeeze(-1)
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 

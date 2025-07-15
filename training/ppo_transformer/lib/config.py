@@ -27,22 +27,39 @@ class Config:
     
     # PPO hyperparameters
     learning_rate: float = 3e-4
+    anneal_lr: bool = False
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
+    clip_vloss: bool = True
     value_coef: float = 0.5
     entropy_coef: float = 0.01
     max_grad_norm: float = 0.5
+    norm_adv: bool = True
     
     # Training
-    mini_batch_size: int = 12
-    ppo_epochs: int = 4
+    mini_batch_size: int = 2_048
+    ppo_epochs: int = 10
     n_envs: int = 1
-    n_steps: int = 4_096
+    n_steps: int = 128
     total_timesteps: int = 1_000_000
+    batch_size: int = int(n_steps * n_envs)
     
     # Logging
     log_interval: int = 2
     save_interval: int = 20
     eval_interval: int = 20
     log_dir: str = "logs/tensorboard"
+
+    # Seeding
+    seed: int = 42
+    torch_deterministic: bool = True
+
+    # GPU
+    cuda: bool = True
+
+    # Video recording
+    record_video: bool = True
+
+    # Target KL
+    target_kl: float = None

@@ -26,7 +26,7 @@ class FrameSkipWrapper(gym.Wrapper):
         return self.env.reset(**kwargs)
 
 
-def make_env(config: Config):
+def make_env(config: Config, seed: int, idx: int, run_name: str):
     """Create environment factory"""
     def _init():
         env = gym.make('Snake-v0', screen_width=config.frame_width, screen_height=config.frame_height, zoom_level=1.0)
@@ -34,5 +34,8 @@ def make_env(config: Config):
         env = FrameSkipWrapper(env, skip=config.frame_skip)
         env = gym.wrappers.ResizeObservation(env, (config.output_height, config.output_width))
         env = gym.wrappers.FrameStackObservation(env, config.frame_stack)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        if config.record_video and idx == 0:
+            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         return env
     return _init
