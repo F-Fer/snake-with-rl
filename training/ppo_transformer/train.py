@@ -404,6 +404,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_name = f"snake_ppo_{int(time.time())}"
+    print(f"Run name: {run_name}")
     
     # Create config
     config = Config()
@@ -562,7 +563,7 @@ if __name__ == "__main__":
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+                nn.utils.clip_grad_norm_(agent.parameters(), config.max_grad_norm)
                 optimizer.step()
 
             if config.target_kl is not None:
@@ -582,7 +583,6 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
     envs.close()
