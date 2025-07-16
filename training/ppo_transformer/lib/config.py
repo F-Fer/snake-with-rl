@@ -62,3 +62,10 @@ class Config:
 
     # Target KL
     target_kl: float = None
+
+    # Random action reset
+    max_random_steps: int = 30
+    random_action_reset: bool = True
+
+    # Gray scale
+    gray_scale: bool = True

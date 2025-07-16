@@ -6,7 +6,7 @@ import gymnasium as gym
 from training.ppo_transformer.lib.config import Config
 from torch.distributions import TransformedDistribution, TanhTransform, Independent, Normal
 
-HID_SIZE = 256
+HID_SIZE = 512
 
 
 def calculate_conv_output_size(input_size, kernel_size, stride, padding=0):
@@ -102,6 +102,12 @@ class SimpleImagePreprocessor(nn.Module):
         x = x.permute(0, 1, 4, 2, 3).reshape(batch_size, seq_len * n_channels, frame_height, frame_width)
         
         return x
+    
+
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
         
 
 class SimpleModel(nn.Module):
@@ -138,16 +144,13 @@ class SimpleModel(nn.Module):
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(conv_output_size, HID_SIZE),
-            nn.Dropout(self.config.dropout),
+            layer_init(nn.Linear(conv_output_size, HID_SIZE)),
+            nn.ReLU(),
         )
 
-        self.actor_mean = nn.Sequential(
-            nn.Tanh(),
-            nn.Linear(HID_SIZE, self.config.action_dim)
-        )  # Outputs for means
+        self.actor_mean = layer_init(nn.Linear(HID_SIZE, self.config.action_dim)) # Outputs for means
         self.actor_logstd = nn.Parameter(torch.zeros(1, self.config.action_dim)) # Outputs for log_stds (unbounded)
-        self.critic = nn.Linear(HID_SIZE, 1)  # Unbounded value output
+        self.critic = layer_init(nn.Linear(HID_SIZE, 1))  # Unbounded value output
     
     def get_value(self, x: torch.Tensor) -> torch.Tensor:
         """
