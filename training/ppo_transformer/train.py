@@ -585,6 +585,11 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
+        if global_step % config.save_interval == 0:
+            os.makedirs(config.save_dir, exist_ok=True)
+            torch.save(agent.state_dict(), f"{config.save_dir}/run_{run_name}_step_{global_step}.pth")
+            print(f"Saved model to {config.save_dir}/run_{run_name}_step_{global_step}.pth")
+
     envs.close()
     writer.close()
     print("Training complete")

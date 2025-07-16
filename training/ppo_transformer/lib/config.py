@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 @dataclass
 class Config:
     # Output dimensions
-    output_width: int = 224 # downsample from original frame width 85 * 8
-    output_height: int = 224
+    output_width: int = 112 # downsample from original 
+    output_height: int = 112
 
     # Environment
     n_channels: int = 3
@@ -46,10 +46,9 @@ class Config:
     batch_size: int = int(n_steps * n_envs)
     
     # Logging
-    log_interval: int = 2
-    save_interval: int = 20
-    eval_interval: int = 20
-    log_dir: str = "logs/tensorboard"
+    save_interval: int = 100 # updates
+    save_dir: str = "models"
+    log_dir: str = "logs"
 
     # Seeding
     seed: int = 42

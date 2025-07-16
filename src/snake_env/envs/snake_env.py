@@ -305,6 +305,9 @@ class SnakeEnv(gym.Env):
         self.score = 0
         self.game_over = False
         self.previous_length = 3 # Initial length
+
+        self.current_episode_length = 0
+        self.current_episode_reward = 0.0
         
         # Add initial body segments behind the head
         self._add_initial_segments(3)
@@ -391,11 +394,15 @@ class SnakeEnv(gym.Env):
         """
         action: [cos_val, sin_val]
         """
+        self.current_episode_length += 1
+
         # Check if game is already over
         if self.game_over:
             observation = self._render_frame()
             info = self._get_info()
-            self.current_episode_length += 1
+            info["episode_done"] = True
+            info["episode_length"] = self.current_episode_length
+            info["episode_return"] = self.current_episode_reward
             return observation, 0, True, False, info
         
         # Action is [cos_val, sin_val]
