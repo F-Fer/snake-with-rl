@@ -201,7 +201,7 @@ class BotSnake:
         return False, eaten_food_indices  # Bot is alive, return which food it ate
 
 class SnakeEnv(gym.Env):
-    metadata = {'render_modes': ['rgb_array']}
+    metadata = {'render_modes': ['rgb_array'], 'render_fps': 30}
 
     # Reward constants - rebalanced for better learning
     C1 = 1.0      # Per-segment growth (not just length change)
@@ -210,6 +210,10 @@ class SnakeEnv(gym.Env):
     SURVIVAL_REWARD = 0.1  # Small reward for staying alive
     
     def __init__(self, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10, screen_width=256, screen_height=256, zoom_level=1.0):
+        import os
+        os.environ["SDL_VIDEODRIVER"] = "dummy"
+        pygame.init()
+
         self.screen_width = screen_width
         self.screen_height = screen_height
         self.render_mode = "rgb_array" 
@@ -803,5 +807,9 @@ class SnakeEnv(gym.Env):
             np.array(pygame.surfarray.pixels3d(final_observation_canvas), dtype=np.uint8), axes=(1, 0, 2) # Transpose for (height, width, channel)
         )
 
+    def render(self):
+        return self._render_frame()
+
     def close(self):
+        pygame.display.quit()
         pygame.quit() 

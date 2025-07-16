@@ -423,7 +423,10 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if config.cuda and torch.cuda.is_available() else "cpu")
 
-    envs = gym.vector.SyncVectorEnv([make_env(config, config.seed + i, i, run_name) for i in range(config.n_envs)])
+    envs = gym.vector.SyncVectorEnv(
+        [make_env(config, config.seed + i, i, run_name) for i in range(config.n_envs)],
+        autoreset_mode=gym.vector.AutoresetMode.NEXT_STEP
+        )
 
     agent = SimpleModel(config).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=config.learning_rate, eps=1e-5)
@@ -439,7 +442,8 @@ if __name__ == "__main__":
     # Start the game
     global_step = 0
     start_time = time.time()
-    next_obs = torch.Tensor(envs.reset()).to(device)
+    next_obs, _ = envs.reset(seed=config.seed)
+    next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(config.n_envs).to(device)
     num_updates = config.total_timesteps // config.batch_size
 
@@ -458,16 +462,19 @@ if __name__ == "__main__":
 
             # Action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(obs)
+                action, logprob, _, value = agent.get_action_and_value(next_obs)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
 
             # Execute the game and log data.
-            next_obs, reward, done, info = envs.step(action.cpu().numpy())
+            next_obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
+            done = np.logical_or(terminated, truncated)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
 
+            print(type(info))
+            print(info)
             for item in info:
                 if "episode" in item.keys():
                     print(f"global_step={global_step}, episodic_return={item['episode']['r']}")

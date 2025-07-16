@@ -1,6 +1,7 @@
 import gymnasium as gym
 from training.ppo_transformer.lib.config import Config
 from snake_env.envs.snake_env import SnakeEnv
+from typing import Callable
 
 class FrameSkipWrapper(gym.Wrapper):
     """Repeat the same action for `skip` frames and accumulate rewards."""
@@ -26,7 +27,7 @@ class FrameSkipWrapper(gym.Wrapper):
         return self.env.reset(**kwargs)
 
 
-def make_env(config: Config, seed: int, idx: int, run_name: str):
+def make_env(config: Config, seed: int, idx: int, run_name: str) -> Callable:
     """Create environment factory"""
     def _init():
         env = gym.make('Snake-v0', screen_width=config.frame_width, screen_height=config.frame_height, zoom_level=1.0)
