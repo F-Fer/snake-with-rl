@@ -60,6 +60,9 @@ if __name__ == "__main__":
     dones = torch.zeros((config.n_steps, config.n_envs)).to(device)
     values = torch.zeros((config.n_steps, config.n_envs)).to(device)
 
+    # Observations of the first env for video recording
+    first_obs = []
+
     # Start the game
     global_step = 0
     start_time = time.time()
@@ -80,6 +83,34 @@ if __name__ == "__main__":
 
             obs[step] = next_obs
             dones[step] = next_done
+
+            if config.record_video:
+                # Extract the most recent frame from the stacked observation of the first environment
+                obs_np = next_obs[0].cpu().numpy()
+
+                # If the observation is a stack of frames (shape: [stack, H, W, C]), grab the last frame
+                frame = obs_np[-1] if obs_np.ndim == 4 else obs_np  # Handles both stacked and single-frame cases
+
+                # Accumulate frames for this episode
+                first_obs.append(frame)
+
+                # Once the episode for env-0 terminates, write the video to TensorBoard
+                if next_done[0].item():
+                    if len(first_obs) > 0:
+                        # Convert collected frames (T, H, W, C) -> (N=1, C, T, H, W)
+                        video_frames = np.array(first_obs, dtype=np.uint8)
+                        video_tensor = torch.from_numpy(video_frames).permute(0, 3, 1, 2).unsqueeze(0)  # (1, T, C, H, W)
+
+                        # Add batch dimension (N=1) and log video to TensorBoard.
+                        writer.add_video(
+                            "video/episode_0",
+                            video_tensor,  # (1, C, T, H, W)
+                            global_step=global_step,
+                            fps=3
+                        )
+
+                    # Clear stored frames for the next episode
+                    first_obs.clear()
 
             # Action logic
             with torch.no_grad():

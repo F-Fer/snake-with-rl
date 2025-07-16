@@ -35,8 +35,6 @@ def make_env(config: Config, seed: int, idx: int, run_name: str) -> Callable:
         # Apply frameskip before other wrappers so they operate on skipped observations
         env = FrameSkipWrapper(env, skip=config.frame_skip)
         env = gym.wrappers.ResizeObservation(env, (config.output_height, config.output_width))
-        if config.record_video and idx == 0:
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         env = gym.wrappers.FrameStackObservation(env, config.frame_stack)
         return env
     return _init
