@@ -266,6 +266,8 @@ class SnakeEnv(gym.Env):
         
         # Initialize game state
         self.reset()
+        self.current_episode_length = 0
+        self.current_episode_reward = 0.0
 
     
     def _get_info(self):
@@ -322,7 +324,9 @@ class SnakeEnv(gym.Env):
         
         observation = self._render_frame()
         info = self._get_info()
-        
+        info["episode_done"] = False
+        info["episode_lengths"] = 0
+        info["episode_returns"] = 0.0
         return observation, info
     
     
@@ -391,6 +395,7 @@ class SnakeEnv(gym.Env):
         if self.game_over:
             observation = self._render_frame()
             info = self._get_info()
+            self.current_episode_length += 1
             return observation, 0, True, False, info
         
         # Action is [cos_val, sin_val]
@@ -638,6 +643,18 @@ class SnakeEnv(gym.Env):
 
         observation = self._render_frame()
         info = self._get_info()
+        self.current_episode_reward += reward
+
+        done = terminated or truncated
+
+        info = self._get_info()
+        info["episode_done"] = done
+        if done:
+            info["episode_length"] = self.current_episode_length
+            info["episode_return"] = self.current_episode_reward
+        else:
+            info["episode_length"] = 0
+            info["episode_return"] = 0.0
 
         return observation, reward, terminated, truncated, info
     

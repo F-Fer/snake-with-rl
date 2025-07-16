@@ -473,14 +473,20 @@ if __name__ == "__main__":
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
 
-            print(type(info))
-            print(info)
-            for item in info:
-                if "episode" in item.keys():
-                    print(f"global_step={global_step}, episodic_return={item['episode']['r']}")
-                    writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
-                    writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
-                    break
+            # info is a dict of lists, each list entry containing the episode info for the corresponding environment\
+            if "episode_done" in info.keys() and "episode_length" in info.keys() and "episode_return" in info.keys():
+                done_idx = info["episode_done"]
+                episode_lengths = info["episode_length"]
+                episode_returns = info["episode_return"]
+                if np.any(done_idx):
+                    for i in range(config.n_envs):
+                        if done_idx[i]:
+                            # Only log the first episode that terminates
+                            print(f"global_step={global_step}, episodic_return={episode_returns[i]}, episodic_length={episode_lengths[i]}")
+                            writer.add_scalar("charts/episodic_return", episode_returns[i], global_step)
+                            writer.add_scalar("charts/episodic_length", episode_lengths[i], global_step)
+                            break
+            
 
         # Bootstrap value if not done
         with torch.no_grad():
