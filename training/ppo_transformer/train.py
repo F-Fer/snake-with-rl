@@ -91,6 +91,10 @@ if __name__ == "__main__":
                 # If the observation is a stack of frames (shape: [stack, H, W, C]), grab the last frame
                 frame = obs_np[-1] if obs_np.ndim == 4 else obs_np  # Handles both stacked and single-frame cases
 
+                # Convert grayscale to RGB if necessary
+                if frame.shape[-1] == 1:  # Grayscale
+                    frame = np.repeat(frame, 3, axis=-1)  # Convert to RGB by repeating the channel
+
                 # Accumulate frames for this episode
                 first_obs.append(frame)
 

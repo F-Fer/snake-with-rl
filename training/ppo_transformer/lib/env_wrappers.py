@@ -73,7 +73,7 @@ def make_env(config: Config, seed: int, idx: int, run_name: str) -> Callable:
         env = FrameSkipWrapper(env, skip=config.frame_skip)
         env = gym.wrappers.ResizeObservation(env, (config.output_height, config.output_width))
         if config.gray_scale:
-            env = gym.wrappers.GrayscaleObservation(env)
+            env = gym.wrappers.GrayscaleObservation(env, keep_dim=True)
         env = gym.wrappers.FrameStackObservation(env, config.frame_stack)
         return env
     return _init

@@ -175,15 +175,16 @@ class SimpleModel(nn.Module):
         action_mean = self.actor_mean(x)
 
         # Get action logstd (state independent)
+        # Clamp log std to a reasonable range to avoid numerical issues
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
-
         # Create normal distribution
-        probs = Normal(action_mean, action_std)
+        base_dist = Independent(Normal(action_mean, action_std), 1)
+        probs = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
 
-        # Sample action if not provided
+        # Sample action if not provided, otherwise ensure provided action is within valid bounds
         if action is None:
             action = probs.sample()
 
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+        return action, probs.log_prob(action), base_dist.entropy(), self.critic(x)
 

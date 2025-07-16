@@ -8,7 +8,7 @@ class Config:
     output_height: int = 112
 
     # Environment
-    n_channels: int = 3
+    n_channels: int = 1
     frame_stack: int = 5  # N frames to stack
     frame_skip: int = 4  # Repeat each action for this many frames
     frame_width: int = 448 # output_width * 8
@@ -26,14 +26,14 @@ class Config:
     action_dim: int = 2  # 2 for sine (mean, std), 2 for cosine (mean, std)
     
     # PPO hyperparameters
-    learning_rate: float = 3e-4
-    anneal_lr: bool = False
+    learning_rate: float = 2.5e-4
+    anneal_lr: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
     clip_vloss: bool = True
     value_coef: float = 0.5
-    entropy_coef: float = 0.01
+    entropy_coef: float = 0.00
     max_grad_norm: float = 0.5
     norm_adv: bool = True
     
@@ -42,7 +42,7 @@ class Config:
     ppo_epochs: int = 10
     n_envs: int = 2
     n_steps: int = 128
-    total_timesteps: int = 1_000_000
+    total_timesteps: int = 2_000_000
     batch_size: int = int(n_steps * n_envs)
     
     # Logging
