@@ -33,15 +33,15 @@ class Config:
     clip_epsilon: float = 0.2
     clip_vloss: bool = True
     value_coef: float = 0.5
-    entropy_coef: float = 0.00
+    entropy_coef: float = 0.05
     max_grad_norm: float = 0.5
     norm_adv: bool = True
     
     # Training
-    mini_batch_size: int = 2_048
+    mini_batch_size: int = 512
     ppo_epochs: int = 10
-    n_envs: int = 8
-    n_steps: int = 512
+    n_envs: int = 16
+    n_steps: int = 1_024
     total_timesteps: int = 2_000_000
     batch_size: int = int(n_steps * n_envs)
     
@@ -64,7 +64,7 @@ class Config:
     target_kl: float = None
 
     # Random action reset
-    max_random_steps: int = 30
+    max_random_steps: int = 50
     random_action_reset: bool = True
 
     # Gray scale
