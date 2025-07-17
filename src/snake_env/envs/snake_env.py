@@ -208,8 +208,9 @@ class SnakeEnv(gym.Env):
     C2 = 0.5      # Per segment of eliminated opponent
     C3 = 5.0      # Death penalty
     SURVIVAL_REWARD = 0.0  # Small reward for staying alive
+    FOOD_PROXIMITY_REWARD = 0.02  # Reward for getting closer to food
     
-    def __init__(self, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10, screen_width=256, screen_height=256, zoom_level=1.0):
+    def __init__(self, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10, screen_width=256, screen_height=256, zoom_level=1.0, seed=42):
         import os
         os.environ["SDL_VIDEODRIVER"] = "dummy"
         pygame.init()
@@ -222,6 +223,8 @@ class SnakeEnv(gym.Env):
         # World dimensions (larger than screen)
         self.world_width = world_size
         self.world_height = world_size
+
+        self.seed = seed
         
         # Camera/viewport settings
         self.camera_x = 0
@@ -281,8 +284,8 @@ class SnakeEnv(gym.Env):
         }
         
 
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed)
+    def reset(self, options=None):
+        super().reset(self.seed)
         
         # Initialize snake position at the center of the world
         center_x = self.world_width // 2
@@ -305,6 +308,7 @@ class SnakeEnv(gym.Env):
         self.score = 0
         self.game_over = False
         self.previous_length = 3 # Initial length
+        self.previous_nearest_food_distance = None  # Track distance to nearest food
 
         self.current_episode_length = 0
         self.current_episode_reward = 0.0
@@ -545,8 +549,24 @@ class SnakeEnv(gym.Env):
         if not terminated:
             reward += self.SURVIVAL_REWARD
             
-        # Check for food collection by player
+        # Add food proximity reward - reward for getting closer to nearest food
         head_x, head_y = self.snake_body[0]
+        if not terminated and self.food_positions:
+            nearest_food_distance = min(
+                math.sqrt((head_x - food_x)**2 + (head_y - food_y)**2)
+                for food_x, food_y in self.food_positions
+            )
+            
+            if self.previous_nearest_food_distance is not None:
+                distance_improvement = self.previous_nearest_food_distance - nearest_food_distance
+                # Only reward if getting closer, cap the reward to prevent exploitation
+                if distance_improvement > 0:
+                    proximity_reward = min(self.FOOD_PROXIMITY_REWARD, distance_improvement * 0.001)
+                    reward += proximity_reward
+            
+            self.previous_nearest_food_distance = nearest_food_distance
+            
+        # Check for food collection by player
         food_eaten = False
         
         for i, (food_x, food_y) in enumerate(self.food_positions[:]):

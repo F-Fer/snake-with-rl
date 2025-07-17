@@ -66,7 +66,7 @@ if __name__ == "__main__":
     # Start the game
     global_step = 0
     start_time = time.time()
-    next_obs, _ = envs.reset(seed=config.seed)
+    next_obs, _ = envs.reset()
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(config.n_envs).to(device)
     num_updates = config.total_timesteps // config.batch_size
