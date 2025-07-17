@@ -10,10 +10,9 @@ from typing import Tuple
 import gymnasium as gym
 import time
 
-from training.ppo_transformer.lib.config import Config
-from training.ppo_transformer.lib.model import ViNTActorCritic
-from training.ppo_transformer.lib.simple_model import SimpleModel
-from training.ppo_transformer.lib.env_wrappers import make_env
+from training.lib.atari_config import Config
+from training.lib.atari_model import SimpleModel
+from training.lib.env_wrappers import make_env
 
 
 if __name__ == "__main__":

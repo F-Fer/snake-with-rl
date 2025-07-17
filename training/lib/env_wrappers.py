@@ -1,5 +1,5 @@
 import gymnasium as gym
-from training.ppo_transformer.lib.config import Config
+from training.lib.atari_config import Config
 from snake_env.envs.snake_env import SnakeEnv
 from typing import Callable
 

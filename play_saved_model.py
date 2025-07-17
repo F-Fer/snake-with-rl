@@ -9,10 +9,10 @@ import numpy as np
 import torch
 import pygame
 
-from training.ppo_transformer.lib.config import Config
+from training.lib.atari_config import Config
 from training.ppo_transformer.lib.model import ViNTActorCritic
 from training.ppo_transformer.lib.simple_model import SimpleModel
-from training.ppo_transformer.lib.env_wrappers import make_env
+from training.lib.env_wrappers import make_env
 from snake_env.envs.snake_env import SnakeEnv
 
 

@@ -7,7 +7,7 @@ from efficientnet_pytorch import EfficientNet
 from torch.distributions import TransformedDistribution, TanhTransform, Independent, Normal
 from torchvision import transforms
 
-from training.ppo_transformer.lib.config import Config
+from training.lib.atari_config import Config
 
 
 class PositionalEncoding(nn.Module):
