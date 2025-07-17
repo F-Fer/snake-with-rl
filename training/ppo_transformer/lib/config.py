@@ -69,3 +69,8 @@ class Config:
 
     # Gray scale
     gray_scale: bool = True
+
+    # Snake env
+    world_size: int = 3000
+    num_bots: int = 10
+    num_foods: int = 100

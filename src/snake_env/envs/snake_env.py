@@ -207,7 +207,7 @@ class SnakeEnv(gym.Env):
     C1 = 1.0      # Per-segment growth (not just length change)
     C2 = 0.5      # Per segment of eliminated opponent
     C3 = 5.0      # Death penalty
-    SURVIVAL_REWARD = 0.1  # Small reward for staying alive
+    SURVIVAL_REWARD = 0.0  # Small reward for staying alive
     
     def __init__(self, world_size=3000, snake_segment_radius=10, num_bots=3, num_foods=10, screen_width=256, screen_height=256, zoom_level=1.0):
         import os

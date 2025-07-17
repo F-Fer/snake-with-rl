@@ -64,7 +64,14 @@ class RandomActionResetWrapper(gym.Wrapper):
 def make_env(config: Config, seed: int, idx: int, run_name: str) -> Callable:
     """Create environment factory"""
     def _init():
-        env = gym.make('Snake-v0', screen_width=config.frame_width, screen_height=config.frame_height, zoom_level=1.0)
+        env = gym.make(
+            'Snake-v0', 
+            screen_width=config.frame_width, 
+            screen_height=config.frame_height, 
+            zoom_level=1.0, 
+            num_bots=config.num_bots, 
+            num_foods=config.num_foods,
+            world_size=config.world_size)
 
         if config.random_action_reset:
             env = RandomActionResetWrapper(env, config.max_random_steps)
