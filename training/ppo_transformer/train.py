@@ -50,6 +50,10 @@ if __name__ == "__main__":
         )
 
     agent = SimpleModel(config).to(device)
+
+    if args.model is not None:
+        agent.load_state_dict(torch.load(args.model))
+
     optimizer = optim.Adam(agent.parameters(), lr=config.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup

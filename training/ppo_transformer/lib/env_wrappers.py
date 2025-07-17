@@ -71,7 +71,8 @@ def make_env(config: Config, seed: int, idx: int, run_name: str) -> Callable:
             zoom_level=1.0, 
             num_bots=config.num_bots, 
             num_foods=config.num_foods,
-            world_size=config.world_size)
+            world_size=config.world_size,
+            seed=seed)
 
         if config.random_action_reset:
             env = RandomActionResetWrapper(env, config.max_random_steps)

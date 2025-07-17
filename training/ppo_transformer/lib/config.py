@@ -42,11 +42,11 @@ class Config:
     ppo_epochs: int = 10
     n_envs: int = 16
     n_steps: int = 1_024
-    total_timesteps: int = 2_000_000
+    total_timesteps: int = 12_000_000
     batch_size: int = int(n_steps * n_envs)
     
     # Logging
-    save_interval: int = 100 # updates
+    save_interval: int = 250 # updates
     save_dir: str = "models"
     log_dir: str = "logs"
 
@@ -64,7 +64,7 @@ class Config:
     target_kl: float = None
 
     # Random action reset
-    max_random_steps: int = 50
+    max_random_steps: int = 80
     random_action_reset: bool = True
 
     # Gray scale
@@ -72,5 +72,5 @@ class Config:
 
     # Snake env
     world_size: int = 3000
-    num_bots: int = 10
-    num_foods: int = 100
+    num_bots: int = 8
+    num_foods: int = 150

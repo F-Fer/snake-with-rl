@@ -284,8 +284,12 @@ class SnakeEnv(gym.Env):
         }
         
 
-    def reset(self, options=None):
-        super().reset(self.seed)
+    def reset(self, seed=None, options=None):
+        """
+        Reset the env.
+        seed is not actually used, but is required by gym.Env.reset(). Using self.seed instead.
+        """
+        super().reset(seed=self.seed)
         
         # Initialize snake position at the center of the world
         center_x = self.world_width // 2
@@ -294,8 +298,8 @@ class SnakeEnv(gym.Env):
         # Start with a single segment (head)
         self.snake_body = [(float(center_x), float(center_y))]
         
-        # Initialize direction angle (0 = right, pi/2 = down, pi = left, 3pi/2 = up)
-        self.direction_angle = 0.0
+        # Initialize direction angle randomly (0 = right, pi/2 = down, pi = left, 3pi/2 = up)
+        self.direction_angle = self.np_random.uniform(0, 2 * math.pi)
         
         # Calculate direction vector
         self.direction_vector = (math.cos(self.direction_angle), math.sin(self.direction_angle))
@@ -561,7 +565,7 @@ class SnakeEnv(gym.Env):
                 distance_improvement = self.previous_nearest_food_distance - nearest_food_distance
                 # Only reward if getting closer, cap the reward to prevent exploitation
                 if distance_improvement > 0:
-                    proximity_reward = min(self.FOOD_PROXIMITY_REWARD, distance_improvement * 0.001)
+                    proximity_reward = min(self.FOOD_PROXIMITY_REWARD, distance_improvement * 0.01)
                     reward += proximity_reward
             
             self.previous_nearest_food_distance = nearest_food_distance
