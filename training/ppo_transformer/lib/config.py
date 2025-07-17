@@ -40,8 +40,8 @@ class Config:
     # Training
     mini_batch_size: int = 2_048
     ppo_epochs: int = 10
-    n_envs: int = 2
-    n_steps: int = 128
+    n_envs: int = 8
+    n_steps: int = 512
     total_timesteps: int = 2_000_000
     batch_size: int = int(n_steps * n_envs)
     

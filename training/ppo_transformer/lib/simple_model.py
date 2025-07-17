@@ -185,6 +185,9 @@ class SimpleModel(nn.Module):
         # Sample action if not provided, otherwise ensure provided action is within valid bounds
         if action is None:
             action = probs.sample()
+        else:
+            eps = 1e-6
+            action = action.clamp(-1 + eps, 1 - eps)
 
         return action, probs.log_prob(action), base_dist.entropy(), self.critic(x)
 
