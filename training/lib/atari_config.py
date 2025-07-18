@@ -26,23 +26,23 @@ class Config:
     action_dim: int = 2  # 2 for sine (mean, std), 2 for cosine (mean, std)
     
     # PPO hyperparameters
-    learning_rate: float = 2.5e-4
-    anneal_lr: bool = True
+    learning_rate: float = 3e-4
+    anneal_lr: bool = False
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    clip_epsilon: float = 0.2
+    clip_epsilon: float = 0.1
     clip_vloss: bool = True
     value_coef: float = 0.5
-    entropy_coef: float = 0.05
+    entropy_coef: float = 0.075
     max_grad_norm: float = 0.5
     norm_adv: bool = True
     
     # Training
     mini_batch_size: int = 512
-    ppo_epochs: int = 10
+    ppo_epochs: int = 15
     n_envs: int = 16
     n_steps: int = 1_024
-    total_timesteps: int = 12_000_000
+    total_timesteps: int = 1_000_000
     batch_size: int = int(n_steps * n_envs)
     
     # Logging
@@ -64,7 +64,7 @@ class Config:
     target_kl: float = None
 
     # Random action reset
-    max_random_steps: int = 80
+    max_random_steps: int = 100
     random_action_reset: bool = True
 
     # Gray scale

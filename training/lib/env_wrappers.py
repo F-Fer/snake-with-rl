@@ -45,15 +45,15 @@ class RandomActionResetWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         """
-        Resets the environment, then takes a random number of random actions.
+        Resets the environment, then takes a random number of a random action.
         If the environment terminates during the random actions, it is reset again.
         """
         obs, info = self.env.reset(**kwargs)
 
         if self.max_random_steps > 0:
             num_random_steps = self.np_random.integers(self.max_random_steps + 1)
+            action = self.action_space.sample()
             for _ in range(num_random_steps):
-                action = self.action_space.sample()
                 obs, _, terminated, truncated, info = self.env.step(action)
                 if terminated or truncated:
                     obs, info = self.env.reset(**kwargs)

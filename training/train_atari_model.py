@@ -242,6 +242,7 @@ if __name__ == "__main__":
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        writer.add_scalar("charts/action_std", agent.actor_logstd.exp().mean().item(), global_step)
 
         if global_step % config.save_interval == 0:
             os.makedirs(config.save_dir, exist_ok=True)
