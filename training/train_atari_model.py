@@ -81,6 +81,12 @@ if __name__ == "__main__":
             lrnow = frac * config.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
+        if config.entropy_coef_anneal:
+            frac = 1.0 - (update - 1.0) / num_updates
+            entropy_coef = frac * config.entropy_coef
+        else:
+            entropy_coef = config.entropy_coef
+
         # Collect rollouts
         for step in range(config.n_steps):
             global_step += 1 * config.n_envs
@@ -218,7 +224,7 @@ if __name__ == "__main__":
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                loss = pg_loss - config.entropy_coef * entropy_loss + v_loss * config.value_coef
+                loss = pg_loss - entropy_coef * entropy_loss + v_loss * config.value_coef
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -237,7 +243,7 @@ if __name__ == "__main__":
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
+        writer.add_scalar("losses/entropy", - entropy_loss.item(), global_step)
         writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)

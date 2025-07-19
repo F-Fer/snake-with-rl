@@ -21,6 +21,7 @@ class Config:
     d_ff: int = 2048
     dropout: float = 0.1
     output_layers: list[int] = field(default_factory=lambda: [256, 128, 64, 32])
+    start_log_std: float = 3.0
     
     # Action space
     action_dim: int = 2  # 2 for sine (mean, std), 2 for cosine (mean, std)
@@ -33,7 +34,8 @@ class Config:
     clip_epsilon: float = 0.1
     clip_vloss: bool = True
     value_coef: float = 0.5
-    entropy_coef: float = 0.03
+    entropy_coef: float = 0.04
+    entropy_coef_anneal: bool = True
     max_grad_norm: float = 0.5
     norm_adv: bool = True
     
@@ -42,7 +44,7 @@ class Config:
     ppo_epochs: int = 15
     n_envs: int = 16
     n_steps: int = 1_024
-    total_timesteps: int = 10_000_000
+    total_timesteps: int = 2_000_000
     batch_size: int = int(n_steps * n_envs)
     
     # Logging
