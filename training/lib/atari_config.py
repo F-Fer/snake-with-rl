@@ -33,7 +33,7 @@ class Config:
     clip_epsilon: float = 0.1
     clip_vloss: bool = True
     value_coef: float = 0.5
-    entropy_coef: float = 0.075
+    entropy_coef: float = 0.03
     max_grad_norm: float = 0.5
     norm_adv: bool = True
     
@@ -42,7 +42,7 @@ class Config:
     ppo_epochs: int = 15
     n_envs: int = 16
     n_steps: int = 1_024
-    total_timesteps: int = 1_000_000
+    total_timesteps: int = 10_000_000
     batch_size: int = int(n_steps * n_envs)
     
     # Logging

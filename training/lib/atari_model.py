@@ -84,7 +84,7 @@ class SimpleModel(nn.Module):
         )
 
         self.actor_mean = layer_init(nn.Linear(HID_SIZE, self.config.action_dim)) # Outputs for means
-        self.actor_logstd = nn.Parameter(torch.zeros(1, self.config.action_dim)) # Outputs for log_stds (unbounded)
+        self.actor_logstd = nn.Parameter(torch.ones(1, self.config.action_dim) * 2.0) # Start with log_std = 1
         self.critic = layer_init(nn.Linear(HID_SIZE, 1))  # Unbounded value output
     
     def get_value(self, x: torch.Tensor) -> torch.Tensor:
