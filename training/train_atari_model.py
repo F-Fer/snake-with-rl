@@ -11,8 +11,22 @@ import gymnasium as gym
 import time
 
 from training.lib.atari_config import Config
-from training.lib.atari_model import SimpleModel
+from training.lib.atari_model import SimpleModel, RNDModule
 from training.lib.env_wrappers import make_env
+
+def compute_gae(rewards, values, next_value, dones, gamma, gae_lambda):
+    advantages = torch.zeros_like(rewards).to(device)
+    lastgaelam = 0
+    for t in reversed(range(config.n_steps)):
+        if t == config.n_steps - 1:
+            nextnonterminal = 1.0 - next_done
+            nextvalues = next_value
+        else:
+            nextnonterminal = 1.0 - dones[t + 1]
+            nextvalues = values[t + 1]
+        delta = rewards[t] + gamma * nextvalues * nextnonterminal - values[t]
+        advantages[t] = lastgaelam = delta + gamma * gae_lambda * nextnonterminal * lastgaelam
+    return advantages
 
 
 if __name__ == "__main__":
@@ -49,6 +63,12 @@ if __name__ == "__main__":
         )
 
     agent = SimpleModel(config).to(device)
+    if config.rnd_enabled:
+        rnd_module = RNDModule(config).to(device)
+        rnd_optimizer = optim.Adam(rnd_module.predictor_net.parameters(), lr=config.rnd_learning_rate)
+    else:
+        rnd_module = None
+        rnd_optimizer = None
 
     if args.model is not None:
         agent.load_state_dict(torch.load(args.model))
@@ -60,9 +80,13 @@ if __name__ == "__main__":
     obs = torch.zeros((config.n_steps, config.n_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((config.n_steps, config.n_envs) + envs.single_action_space.shape).to(device)
     logprobs = torch.zeros((config.n_steps, config.n_envs)).to(device)
-    rewards = torch.zeros((config.n_steps, config.n_envs)).to(device)
+    rewards = torch.zeros((config.n_steps, config.n_envs)).to(device) # Extrinsic rewards
     dones = torch.zeros((config.n_steps, config.n_envs)).to(device)
     values = torch.zeros((config.n_steps, config.n_envs)).to(device)
+    rewards_int = torch.zeros((config.n_steps, config.n_envs)).to(device)  # Intrinsic rewards (RND)
+    if config.use_dual_value_heads:
+        values_ext = torch.zeros((config.n_steps, config.n_envs)).to(device)
+        values_int = torch.zeros((config.n_steps, config.n_envs)).to(device)
 
     # Observations of the first env for video recording
     first_obs = []
@@ -122,8 +146,14 @@ if __name__ == "__main__":
 
             # Action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
-                values[step] = value.flatten()
+                if config.rnd_enabled and config.use_dual_value_heads:
+                    action, logprob, _, value, value_ext, value_int = agent.get_action_and_value(next_obs)
+                    values_ext[step] = value_ext.flatten()
+                    values_int[step] = value_int.flatten()
+                    values[step] = value.flatten() # ext + int
+                else:
+                    action, logprob, _, value = agent.get_action_and_value(next_obs)
+                    values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
 
@@ -131,6 +161,14 @@ if __name__ == "__main__":
             next_obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
+
+            # Compute intrinsic reward (RND)
+            if config.rnd_enabled:
+                with torch.no_grad():
+                    intrinsic_reward = rnd_module(next_obs)
+                    intrinsic_reward = config.rnd_intrinsic_coef * intrinsic_reward
+                    rewards_int[step] = intrinsic_reward.view(-1)
+
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
 
             # info is a dict of lists, each list entry containing the episode info for the corresponding environment\
@@ -148,22 +186,26 @@ if __name__ == "__main__":
                             break
             
 
-        # Bootstrap value if not done
-        with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
-
-            # Compute advantages (GAE)
-            advantages = torch.zeros_like(rewards).to(device)
-            lastgaelam = 0
-            for t in reversed(range(config.n_steps)):
-                if t == config.n_steps - 1:
-                    nextnonterminal = 1.0 - next_done
-                    nextvalues = next_value
-                else:
-                    nextnonterminal = 1.0 - dones[t + 1]
-                    nextvalues = values[t + 1]
-                delta = rewards[t] + config.gamma * nextvalues * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = delta + config.gamma * config.gae_lambda * nextnonterminal * lastgaelam
+        # Advantages and returns
+        if config.rnd_enabled and config.use_dual_value_heads:
+            with torch.no_grad():
+                next_value_ext = agent.get_value_ext(next_obs).reshape(1, -1)
+                next_value_int = agent.get_value_int(next_obs).reshape(1, -1)
+                
+                # Extrinsic advantages (episodic)
+                advantages_ext = compute_gae(rewards, values_ext, next_value_ext, dones, config.gamma, config.gae_lambda)
+                returns_ext = advantages_ext + values_ext
+                
+                # Intrinsic advantages (non-episodic)
+                advantages_int = compute_gae(rewards_int, values_int, next_value_int, torch.zeros_like(dones), config.rnd_gamma, config.gae_lambda)
+                returns_int = advantages_int + values_int
+                
+                # Combined advantages
+                advantages = advantages_ext + advantages_int
+                returns = returns_ext + returns_int
+        else:
+            total_rewards = rewards + (rewards_int if config.rnd_enabled else 0)
+            advantages = compute_gae(total_rewards, values, dones, config.gamma, config.gae_lambda)
             returns = advantages + values
 
         # Flatten the batch
@@ -173,6 +215,10 @@ if __name__ == "__main__":
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
+        b_returns_int = returns_int.reshape(-1)
+        if config.use_dual_value_heads:
+            b_values_ext = values_ext.reshape(-1)
+            b_values_int = values_int.reshape(-1)
 
         # Optimizing the policy and value network
         b_inds = np.arange(config.batch_size)
@@ -183,7 +229,11 @@ if __name__ == "__main__":
                 end = start + config.mini_batch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+                if config.use_dual_value_heads:
+                    _, newlogprob, entropy, _, newvalue_ext, newvalue_int = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+                    newvalue = newvalue_ext + newvalue_int
+                else:
+                    _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -205,7 +255,13 @@ if __name__ == "__main__":
                 # Value loss
                 newvalue = newvalue.view(-1)
                 if config.clip_vloss:
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
+                    if config.use_dual_value_heads:
+                        v_loss_ext = 0.5 * ((newvalue_ext.view(-1) - b_returns[mb_inds]) ** 2).mean()
+                        v_loss_int = 0.5 * ((newvalue_int.view(-1) - b_returns_int[mb_inds]) ** 2).mean()
+                        v_loss_unclipped = v_loss_ext + v_loss_int
+                    else:
+                        v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
+
                     v_clipped = b_values[mb_inds] + torch.clamp(
                         newvalue - b_values[mb_inds],
                         -config.clip_epsilon,
@@ -215,7 +271,9 @@ if __name__ == "__main__":
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
                 else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                    v_loss_ext = 0.5 * ((newvalue_ext.view(-1) - b_returns[mb_inds]) ** 2).mean()
+                    v_loss_int = 0.5 * ((newvalue_int.view(-1) - b_returns_int[mb_inds]) ** 2).mean()
+                    v_loss = v_loss_ext + v_loss_int
 
                 entropy_loss = entropy.mean()
                 loss = pg_loss - config.entropy_coef * entropy_loss + v_loss * config.value_coef
@@ -224,6 +282,25 @@ if __name__ == "__main__":
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), config.max_grad_norm)
                 optimizer.step()
+
+                # Train RND predictor
+                if config.rnd_enabled:
+                    # Sample subset of data for RND training
+                    rnd_sample_size = int(len(mb_inds) * config.rnd_update_proportion)
+                    rnd_inds = np.random.choice(mb_inds, rnd_sample_size, replace=False)
+                    
+                    # Compute RND loss
+                    predicted_features = rnd_module.predictor_net(rnd_module.normalize_obs(b_obs[rnd_inds]))
+                    with torch.no_grad():
+                        target_features = rnd_module.target_net(rnd_module.normalize_obs(b_obs[rnd_inds]))
+                    
+                    rnd_loss = 0.5 * (predicted_features - target_features).pow(2).mean()
+                    
+                    # Update RND predictor
+                    rnd_optimizer.zero_grad()
+                    rnd_loss.backward()
+                    nn.utils.clip_grad_norm_(rnd_module.predictor_net.parameters(), config.max_grad_norm)
+                    rnd_optimizer.step()
 
             if config.target_kl is not None:
                 if approx_kl > config.target_kl:
@@ -244,6 +321,12 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
         writer.add_scalar("charts/action_std", agent.actor_logstd.exp().mean().item(), global_step)
+
+        if config.rnd_enabled:
+            writer.add_scalar("rnd/intrinsic_reward_mean", rewards_int.mean().item(), global_step)
+            writer.add_scalar("rnd/intrinsic_reward_std", rewards_int.std().item(), global_step)
+            writer.add_scalar("rnd/predictor_loss", rnd_loss.item(), global_step)
+            writer.add_scalar("rnd/reward_running_std", torch.sqrt(rnd_module.reward_running_var).item(), global_step)
 
         if global_step % config.save_interval == 0:
             os.makedirs(config.save_dir, exist_ok=True)

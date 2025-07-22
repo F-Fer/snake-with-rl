@@ -96,14 +96,35 @@ class SimpleModel(nn.Module):
 
         self.actor_mean = layer_init(nn.Linear(self.config.d_model, self.config.action_dim)) # Outputs for means
         self.actor_logstd = nn.Parameter(torch.ones(1, self.config.action_dim) * 0.5) # Start with log_std = 1
-        self.critic = layer_init(nn.Linear(self.config.d_model, 1))  # Unbounded value output
+        if self.config.use_dual_value_heads:
+            self.critic_ext = layer_init(nn.Linear(self.config.d_model, 1))  # Extrinsic value head
+            self.critic_int = layer_init(nn.Linear(self.config.d_model, 1))  # Intrinsic value head
+        else:
+            self.critic = layer_init(nn.Linear(self.config.d_model, 1))  # Unbounded value output
     
     def get_value(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
         """
         x = self.base_model(x)
-        return self.critic(x)
+        if self.config.use_dual_value_heads:
+            return self.critic_ext(x), self.critic_int(x)
+        else:
+            return self.critic(x)
+        
+    def get_value_ext(self, x: torch.Tensor) -> torch.Tensor:
+        """Get extrinsic value estimate"""
+        if not self.config.use_dual_value_heads:
+            return self.get_value(x)
+        x = self.base_model(x)
+        return self.critic_ext(x)
+
+    def get_value_int(self, x: torch.Tensor) -> torch.Tensor:
+        """Get intrinsic value estimate"""
+        if not self.config.use_dual_value_heads:
+            return torch.zeros_like(self.get_value(x))
+        x = self.base_model(x)
+        return self.critic_int(x)
     
     def get_action_and_value(self, x: torch.Tensor, action: torch.Tensor = None) -> torch.Tensor:
         """
@@ -129,7 +150,14 @@ class SimpleModel(nn.Module):
             eps = 1e-6
             action = action.clamp(-1 + eps, 1 - eps)
 
-        return action, probs.log_prob(action), base_dist.entropy(), self.critic(x)
+        if self.config.use_dual_value_heads:
+            value_ext = self.critic_ext(x)
+            value_int = self.critic_int(x)
+            value = value_ext + value_int
+            return action, probs.log_prob(action), base_dist.entropy(), value, value_ext, value_int
+        else:
+            value = self.critic(x)
+            return action, probs.log_prob(action), base_dist.entropy(), value
     
 
 class RNDNetwork(BaseModel):

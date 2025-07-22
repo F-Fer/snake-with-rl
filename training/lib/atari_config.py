@@ -81,3 +81,4 @@ class Config:
     rnd_intrinsic_coef: float = 1.0  # Weight for intrinsic rewards
     rnd_update_proportion: float = 0.25  # Proportion of data used for RND training
     rnd_gamma: float = 0.99  # Discount factor for intrinsic rewards (non-episodic)
+    use_dual_value_heads: bool = True
