@@ -14,12 +14,13 @@ from training.lib.atari_config import Config
 from training.lib.atari_model import SimpleModel, RNDModule
 from training.lib.env_wrappers import make_env
 
-def compute_gae(rewards, values, next_value, dones, gamma, gae_lambda):
+def compute_gae(rewards, values, next_value, dones, gamma, gae_lambda, device):
     advantages = torch.zeros_like(rewards).to(device)
     lastgaelam = 0
-    for t in reversed(range(config.n_steps)):
-        if t == config.n_steps - 1:
-            nextnonterminal = 1.0 - next_done
+    n_steps = rewards.shape[0]
+    for t in reversed(range(n_steps)):
+        if t == n_steps - 1:
+            nextnonterminal = 1.0 - dones[-1]  # Use last done state
             nextvalues = next_value
         else:
             nextnonterminal = 1.0 - dones[t + 1]
@@ -193,19 +194,22 @@ if __name__ == "__main__":
                 next_value_int = agent.get_value_int(next_obs).reshape(1, -1)
                 
                 # Extrinsic advantages (episodic)
-                advantages_ext = compute_gae(rewards, values_ext, next_value_ext, dones, config.gamma, config.gae_lambda)
+                advantages_ext = compute_gae(rewards, values_ext, next_value_ext, dones, config.gamma, config.gae_lambda, device)
                 returns_ext = advantages_ext + values_ext
                 
                 # Intrinsic advantages (non-episodic)
-                advantages_int = compute_gae(rewards_int, values_int, next_value_int, torch.zeros_like(dones), config.rnd_gamma, config.gae_lambda)
+                advantages_int = compute_gae(rewards_int, values_int, next_value_int, torch.zeros_like(dones), config.rnd_gamma, config.gae_lambda, device)
                 returns_int = advantages_int + values_int
                 
                 # Combined advantages
                 advantages = advantages_ext + advantages_int
                 returns = returns_ext + returns_int
         else:
+            # Single value head case
+            with torch.no_grad():
+                next_value = agent.get_value(next_obs).reshape(1, -1)
             total_rewards = rewards + (rewards_int if config.rnd_enabled else 0)
-            advantages = compute_gae(total_rewards, values, dones, config.gamma, config.gae_lambda)
+            advantages = compute_gae(total_rewards, values, next_value, dones, config.gamma, config.gae_lambda, device)
             returns = advantages + values
 
         # Flatten the batch
@@ -215,8 +219,9 @@ if __name__ == "__main__":
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
-        b_returns_int = returns_int.reshape(-1)
         if config.use_dual_value_heads:
+            b_returns_ext = returns_ext.reshape(-1)
+            b_returns_int = returns_int.reshape(-1)
             b_values_ext = values_ext.reshape(-1)
             b_values_int = values_int.reshape(-1)
 
@@ -254,26 +259,29 @@ if __name__ == "__main__":
 
                 # Value loss
                 newvalue = newvalue.view(-1)
-                if config.clip_vloss:
-                    if config.use_dual_value_heads:
-                        v_loss_ext = 0.5 * ((newvalue_ext.view(-1) - b_returns[mb_inds]) ** 2).mean()
+                if config.use_dual_value_heads:
+                    if config.clip_vloss:
+                        # For dual heads, compute separate losses but don't clip them separately
+                        v_loss_ext = 0.5 * ((newvalue_ext.view(-1) - b_returns_ext[mb_inds]) ** 2).mean()
                         v_loss_int = 0.5 * ((newvalue_int.view(-1) - b_returns_int[mb_inds]) ** 2).mean()
-                        v_loss_unclipped = v_loss_ext + v_loss_int
+                        v_loss = v_loss_ext + v_loss_int
                     else:
-                        v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-
-                    v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds],
-                        -config.clip_epsilon,
-                        config.clip_epsilon,
-                    )
-                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
+                        v_loss_ext = 0.5 * ((newvalue_ext.view(-1) - b_returns_ext[mb_inds]) ** 2).mean()
+                        v_loss_int = 0.5 * ((newvalue_int.view(-1) - b_returns_int[mb_inds]) ** 2).mean()
+                        v_loss = v_loss_ext + v_loss_int
                 else:
-                    v_loss_ext = 0.5 * ((newvalue_ext.view(-1) - b_returns[mb_inds]) ** 2).mean()
-                    v_loss_int = 0.5 * ((newvalue_int.view(-1) - b_returns_int[mb_inds]) ** 2).mean()
-                    v_loss = v_loss_ext + v_loss_int
+                    if config.clip_vloss:
+                        v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
+                        v_clipped = b_values[mb_inds] + torch.clamp(
+                            newvalue - b_values[mb_inds],
+                            -config.clip_epsilon,
+                            config.clip_epsilon,
+                        )
+                        v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+                        v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                        v_loss = 0.5 * v_loss_max.mean()
+                    else:
+                        v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
                 loss = pg_loss - config.entropy_coef * entropy_loss + v_loss * config.value_coef

@@ -82,8 +82,9 @@ class BaseModel(nn.Module):
             layer_init(nn.Linear(self.config.d_model, self.config.d_model))
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.image_preprocessor(x)
+    def forward(self, x: torch.Tensor, preprocess: bool = True) -> torch.Tensor:
+        if preprocess:
+            x = self.image_preprocessor(x)
         x = self.feature_net(x)
         return x
 
@@ -160,20 +161,19 @@ class SimpleModel(nn.Module):
             return action, probs.log_prob(action), base_dist.entropy(), value
     
 
-class RNDNetwork(BaseModel):
+class RNDNetwork(nn.Module):
     def __init__(self, config: Config):
-        super(RNDNetwork, self).__init__(config)
+        super(RNDNetwork, self).__init__()
         self.config = config
-        self.rnd_net = BaseModel(config)
-    
+        self.feature_net = BaseModel(config)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.rnd_net(x)
+        return self.feature_net(x, preprocess=False)
     
 
 class RNDTargetNetwork(RNDNetwork):
     def __init__(self, config: Config):
         super(RNDTargetNetwork, self).__init__(config)
-
         # Freeze the target network
         for param in self.parameters():
             param.requires_grad = False
@@ -191,6 +191,8 @@ class RNDModule(nn.Module):
 
         self.predictor_net = RNDPredictorNetwork(config)
         self.target_net = RNDTargetNetwork(config)
+
+        self.preproc = self.predictor_net.feature_net.image_preprocessor  
 
         # Running statistics for observation normalization
         self.register_buffer('obs_running_mean', torch.zeros(1))
@@ -229,16 +231,16 @@ class RNDModule(nn.Module):
         normalized = (obs - self.obs_running_mean) / torch.sqrt(self.obs_running_var + 1e-8)
         return torch.clamp(normalized, -5, 5)
     
-    def compute_intrinsic_reward(self, obs):
+    def compute_intrinsic_reward(self, x):
         """Compute intrinsic reward from prediction error"""
-        # Normalize observations
-        normalized_obs = self.normalize_obs(obs)
+        x = self.preproc(x)
+        x = self.normalize_obs(x)
         
         # Get features from both networks
         with torch.no_grad():
-            target_features = self.target_net(normalized_obs)
+            target_features = self.target_net(x)
         
-        predicted_features = self.predictor_net(normalized_obs)
+        predicted_features = self.predictor_net(x)
         
         # Compute prediction error (intrinsic reward)
         intrinsic_reward = 0.5 * (predicted_features - target_features).pow(2).sum(dim=1)
