@@ -33,7 +33,7 @@ class Config:
     clip_epsilon: float = 0.1
     clip_vloss: bool = True
     value_coef: float = 0.5
-    entropy_coef: float = 0.03
+    entropy_coef: float = 0.003
     max_grad_norm: float = 0.5
     norm_adv: bool = True
     
@@ -74,3 +74,10 @@ class Config:
     world_size: int = 3000
     num_bots: int = 8
     num_foods: int = 150
+
+    # RND (Random Network Distillation) parameters
+    rnd_enabled: bool = True
+    rnd_learning_rate: float = 1e-4
+    rnd_intrinsic_coef: float = 1.0  # Weight for intrinsic rewards
+    rnd_update_proportion: float = 0.25  # Proportion of data used for RND training
+    rnd_gamma: float = 0.99  # Discount factor for intrinsic rewards (non-episodic)

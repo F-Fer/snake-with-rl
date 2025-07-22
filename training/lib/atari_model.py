@@ -5,8 +5,6 @@ import gymnasium as gym
 from training.lib.atari_config import Config
 from torch.distributions import TransformedDistribution, TanhTransform, Independent, Normal
 
-HID_SIZE = 512
-
 
 def calculate_conv_output_size(input_size, kernel_size, stride, padding=0):
     """Calculate output size after convolution"""
@@ -43,11 +41,11 @@ class SimpleImagePreprocessor(nn.Module):
         x = x.permute(0, 1, 4, 2, 3).reshape(batch_size, seq_len * n_channels, frame_height, frame_width)
         
         return x
-        
+    
 
-class SimpleModel(nn.Module):
+class BaseModel(nn.Module):
     def __init__(self, config: Config):
-        super(SimpleModel, self).__init__()
+        super(BaseModel, self).__init__()
         self.config = config
 
         self.image_preprocessor = SimpleImagePreprocessor()
@@ -71,7 +69,7 @@ class SimpleModel(nn.Module):
         # Final feature size: 64 channels * h3 * w3
         conv_output_size = 64 * h3 * w3
 
-        self.net = nn.Sequential(
+        self.feature_net = nn.Sequential(
             nn.Conv2d(c, 32, kernel_size=8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
@@ -79,20 +77,32 @@ class SimpleModel(nn.Module):
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
             nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(conv_output_size, HID_SIZE)),
+            layer_init(nn.Linear(conv_output_size, self.config.d_model)),
             nn.ReLU(),
+            layer_init(nn.Linear(self.config.d_model, self.config.d_model))
         )
 
-        self.actor_mean = layer_init(nn.Linear(HID_SIZE, self.config.action_dim)) # Outputs for means
-        self.actor_logstd = nn.Parameter(torch.ones(1, self.config.action_dim) * 2.0) # Start with log_std = 1
-        self.critic = layer_init(nn.Linear(HID_SIZE, 1))  # Unbounded value output
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.image_preprocessor(x)
+        x = self.feature_net(x)
+        return x
+
+class SimpleModel(nn.Module):
+    def __init__(self, config: Config):
+        super(SimpleModel, self).__init__()
+        self.config = config
+
+        self.base_model = BaseModel(config)
+
+        self.actor_mean = layer_init(nn.Linear(self.config.d_model, self.config.action_dim)) # Outputs for means
+        self.actor_logstd = nn.Parameter(torch.ones(1, self.config.action_dim) * 0.5) # Start with log_std = 1
+        self.critic = layer_init(nn.Linear(self.config.d_model, 1))  # Unbounded value output
     
     def get_value(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
         """
-        x = self.image_preprocessor(x)
-        x = self.net(x)
+        x = self.base_model(x)
         return self.critic(x)
     
     def get_action_and_value(self, x: torch.Tensor, action: torch.Tensor = None) -> torch.Tensor:
@@ -100,17 +110,12 @@ class SimpleModel(nn.Module):
         x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
         """
 
-        # Preprocess images (converts to [batch_size , n_channels , frame_height, frame_width] and normalizes)
-        x = self.image_preprocessor(x)
-            
-        # Feed through network
-        x = self.net(x)
+        x = self.base_model(x)
 
         # Get action mean
         action_mean = self.actor_mean(x)
 
         # Get action logstd (state independent)
-        # Clamp log std to a reasonable range to avoid numerical issues
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         # Create normal distribution
@@ -125,4 +130,120 @@ class SimpleModel(nn.Module):
             action = action.clamp(-1 + eps, 1 - eps)
 
         return action, probs.log_prob(action), base_dist.entropy(), self.critic(x)
+    
 
+class RNDNetwork(BaseModel):
+    def __init__(self, config: Config):
+        super(RNDNetwork, self).__init__(config)
+        self.config = config
+        self.rnd_net = BaseModel(config)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.rnd_net(x)
+    
+
+class RNDTargetNetwork(RNDNetwork):
+    def __init__(self, config: Config):
+        super(RNDTargetNetwork, self).__init__(config)
+
+        # Freeze the target network
+        for param in self.parameters():
+            param.requires_grad = False
+
+
+class RNDPredictorNetwork(RNDNetwork):
+    def __init__(self, config: Config):
+        super(RNDPredictorNetwork, self).__init__(config)
+
+
+class RNDModule(nn.Module):
+    def __init__(self, config: Config):
+        super(RNDModule, self).__init__()
+        self.config = config
+
+        self.predictor_net = RNDPredictorNetwork(config)
+        self.target_net = RNDTargetNetwork(config)
+
+        # Running statistics for observation normalization
+        self.register_buffer('obs_running_mean', torch.zeros(1))
+        self.register_buffer('obs_running_var', torch.ones(1))
+        self.register_buffer('obs_count', torch.zeros(1))
+        
+        # Running statistics for reward normalization
+        self.register_buffer('reward_running_mean', torch.zeros(1))
+        self.register_buffer('reward_running_var', torch.ones(1))
+        self.register_buffer('reward_count', torch.zeros(1))
+
+    def normalize_obs(self, obs: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize the observation using running mean and variance
+        """
+        if self.training:
+            # Update running statistics
+            batch_mean = obs.mean()
+            batch_var = obs.var()
+            batch_count = obs.numel()
+            
+            delta = batch_mean - self.obs_running_mean
+            total_count = self.obs_count + batch_count
+            
+            new_mean = self.obs_running_mean + delta * batch_count / total_count
+            m_a = self.obs_running_var * self.obs_count
+            m_b = batch_var * batch_count
+            M2 = m_a + m_b + delta.pow(2) * self.obs_count * batch_count / total_count
+            new_var = M2 / total_count
+            
+            self.obs_running_mean.copy_(new_mean)
+            self.obs_running_var.copy_(new_var)
+            self.obs_count.copy_(total_count)
+        
+        # Normalize and clip
+        normalized = (obs - self.obs_running_mean) / torch.sqrt(self.obs_running_var + 1e-8)
+        return torch.clamp(normalized, -5, 5)
+    
+    def compute_intrinsic_reward(self, obs):
+        """Compute intrinsic reward from prediction error"""
+        # Normalize observations
+        normalized_obs = self.normalize_obs(obs)
+        
+        # Get features from both networks
+        with torch.no_grad():
+            target_features = self.target_net(normalized_obs)
+        
+        predicted_features = self.predictor_net(normalized_obs)
+        
+        # Compute prediction error (intrinsic reward)
+        intrinsic_reward = 0.5 * (predicted_features - target_features).pow(2).sum(dim=1)
+        
+        return intrinsic_reward
+    
+    def normalize_reward(self, reward):
+        """Normalize intrinsic rewards using running statistics"""
+        if self.training and reward.numel() > 0:
+            # Update running statistics
+            batch_mean = reward.mean()
+            batch_var = reward.var()
+            batch_count = reward.numel()
+            
+            delta = batch_mean - self.reward_running_mean
+            total_count = self.reward_count + batch_count
+            
+            if total_count > 0:
+                new_mean = self.reward_running_mean + delta * batch_count / total_count
+                m_a = self.reward_running_var * self.reward_count
+                m_b = batch_var * batch_count
+                M2 = m_a + m_b + delta.pow(2) * self.reward_count * batch_count / total_count
+                new_var = M2 / total_count
+                
+                self.reward_running_mean.copy_(new_mean)
+                self.reward_running_var.copy_(new_var)
+                self.reward_count.copy_(total_count)
+        
+        # Normalize reward
+        return reward / torch.sqrt(self.reward_running_var + 1e-8)
+
+    def forward(self, obs):
+        """Forward pass returning normalized intrinsic reward"""
+        intrinsic_reward = self.compute_intrinsic_reward(obs)
+        normalized_reward = self.normalize_reward(intrinsic_reward)
+        return normalized_reward
