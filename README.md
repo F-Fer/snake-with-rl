@@ -4,6 +4,8 @@ This project implements a Gymnasium environment for a Slither.io-style game, des
 
 As part of the project I also trained several rl-algorithms on the environment, including PPO with random network distillation for intrinsic rewards.
 
+![Slither RL Thumbnail](./images/slither-rl-thumbnail.png)
+
 ## Installation
 
 ### Using `uv` (Recommended)
