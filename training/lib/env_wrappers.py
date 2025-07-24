@@ -1,6 +1,6 @@
 import gymnasium as gym
 from training.lib.atari_config import Config
-from snake_env.envs.snake_env import SnakeEnv
+from snake_env.snake_env import SnakeEnv
 from typing import Callable
 
 class FrameSkipWrapper(gym.Wrapper):

@@ -13,7 +13,7 @@ from training.lib.atari_config import Config
 from training.ppo_transformer.lib.model import ViNTActorCritic
 from training.ppo_transformer.lib.simple_model import SimpleModel
 from training.lib.env_wrappers import make_env
-from snake_env.envs.snake_env import SnakeEnv
+from snake_env.snake_env import SnakeEnv
 
 
 def preprocess_frame(frame: np.ndarray, output_size: tuple[int, int]) -> np.ndarray:
