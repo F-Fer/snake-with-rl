@@ -298,11 +298,14 @@ if __name__ == "__main__":
                     # Sample subset of data for RND training
                     rnd_sample_size = int(len(mb_inds) * config.rnd_update_proportion)
                     rnd_inds = np.random.choice(mb_inds, rnd_sample_size, replace=False)
+
+                    rnd_input = rnd_module.preproc(b_obs[rnd_inds])
+                    rnd_input = rnd_module.normalize_obs(rnd_input)
                     
                     # Compute RND loss
-                    predicted_features = rnd_module.predictor_net(rnd_module.normalize_obs(b_obs[rnd_inds]))
+                    predicted_features = rnd_module.predictor_net(rnd_input)
                     with torch.no_grad():
-                        target_features = rnd_module.target_net(rnd_module.normalize_obs(b_obs[rnd_inds]))
+                        target_features = rnd_module.target_net(rnd_input)
                     
                     rnd_loss = 0.5 * (predicted_features - target_features).pow(2).mean()
                     
