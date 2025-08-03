@@ -107,6 +107,21 @@ if __name__ == "__main__":
             frac = 1.0 - (update - 1.0) / num_updates
             lrnow = frac * config.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
+        
+        # Decay exploration parameters
+        decay_frac = 1.0 - (update - 1.0) / num_updates
+        
+        # Anneal entropy coefficient
+        if config.anneal_entropy_coef:
+            current_entropy_coef = config.min_entropy_coef + (config.entropy_coef - config.min_entropy_coef) * decay_frac
+        else:
+            current_entropy_coef = config.entropy_coef
+            
+        # Anneal RND intrinsic coefficient
+        if config.anneal_rnd_coef and config.rnd_enabled:
+            current_rnd_coef = config.min_rnd_intrinsic_coef + (config.rnd_intrinsic_coef - config.min_rnd_intrinsic_coef) * decay_frac
+        else:
+            current_rnd_coef = config.rnd_intrinsic_coef
 
         # Collect rollouts
         for step in range(config.n_steps):
@@ -171,7 +186,10 @@ if __name__ == "__main__":
             if config.rnd_enabled:
                 with torch.no_grad():
                     intrinsic_reward = rnd_module(next_obs_tensor)
-                    intrinsic_reward = config.rnd_intrinsic_coef * intrinsic_reward
+                    # Clip intrinsic rewards before scaling to prevent instability
+                    if hasattr(config, 'rnd_clip_intrinsic_reward'):
+                        intrinsic_reward = torch.clamp(intrinsic_reward, max=config.rnd_clip_intrinsic_reward)
+                    intrinsic_reward = current_rnd_coef * intrinsic_reward
                     rewards_int[step] = intrinsic_reward.view(-1)
 
             next_obs, next_done = next_obs_tensor, torch.Tensor(done).to(device)
@@ -288,7 +306,7 @@ if __name__ == "__main__":
                         v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                loss = pg_loss - config.entropy_coef * entropy_loss + v_loss * config.value_coef
+                loss = pg_loss - current_entropy_coef * entropy_loss + v_loss * config.value_coef
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -336,6 +354,9 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
         writer.add_scalar("charts/action_std", agent.actor_logstd.exp().mean().item(), global_step)
+        writer.add_scalar("charts/entropy_coef", current_entropy_coef, global_step)
+        if config.rnd_enabled:
+            writer.add_scalar("charts/rnd_intrinsic_coef", current_rnd_coef, global_step)
 
         if config.rnd_enabled:
             writer.add_scalar("rnd/intrinsic_reward_mean", rewards_int.mean().item(), global_step)
