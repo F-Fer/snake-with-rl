@@ -101,6 +101,8 @@ if __name__ == "__main__":
     num_updates = config.total_timesteps // config.batch_size
 
     for update in range(1, num_updates + 1):
+        agent.reset_noise()
+        
         if config.anneal_lr:
             frac = 1.0 - (update - 1.0) / num_updates
             lrnow = frac * config.learning_rate

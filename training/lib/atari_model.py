@@ -4,7 +4,7 @@ import torch.nn as nn
 import gymnasium as gym
 from lib.atari_config import Config
 from torch.distributions import TransformedDistribution, TanhTransform, Independent, Normal
-
+from lib.noisy import NoisyLinear
 
 def calculate_conv_output_size(input_size, kernel_size, stride, padding=0):
     """Calculate output size after convolution"""
@@ -95,13 +95,16 @@ class SimpleModel(nn.Module):
 
         self.base_model = BaseModel(config)
 
-        self.actor_mean = layer_init(nn.Linear(self.config.d_model, self.config.action_dim)) # Outputs for means
+        LinearCls = NoisyLinear if config.use_noisy_linear else nn.Linear
+
+        self.actor_mean = LinearCls(self.config.d_model, self.config.action_dim) # Outputs for means
         self.actor_logstd = nn.Parameter(torch.ones(1, self.config.action_dim) * 0.5) # Start with log_std = 1
+        
         if self.config.use_dual_value_heads:
-            self.critic_ext = layer_init(nn.Linear(self.config.d_model, 1))  # Extrinsic value head
-            self.critic_int = layer_init(nn.Linear(self.config.d_model, 1))  # Intrinsic value head
+            self.critic_ext = LinearCls(self.config.d_model, 1)  # Extrinsic value head
+            self.critic_int = LinearCls(self.config.d_model, 1)  # Intrinsic value head
         else:
-            self.critic = layer_init(nn.Linear(self.config.d_model, 1))  # Unbounded value output
+            self.critic = LinearCls(self.config.d_model, 1)  # Unbounded value output
     
     def get_value(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -159,7 +162,14 @@ class SimpleModel(nn.Module):
         else:
             value = self.critic(x)
             return action, probs.log_prob(action), base_dist.entropy(), value
-    
+        
+    def reset_noise(self):
+        """Reset the noise of the actor and critic networks"""
+        if not self.config.use_noisy_linear:
+            return
+        for m in self.modules():
+            if isinstance(m, NoisyLinear):
+                m.reset_noise()
 
 class RNDNetwork(nn.Module):
     def __init__(self, config: Config):

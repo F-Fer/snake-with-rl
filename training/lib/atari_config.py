@@ -33,7 +33,7 @@ class Config:
     clip_epsilon: float = 0.1
     clip_vloss: bool = True
     value_coef: float = 0.5
-    entropy_coef: float = 0.003
+    entropy_coef: float = 0.001
     max_grad_norm: float = 0.5
     norm_adv: bool = True
     
@@ -82,3 +82,7 @@ class Config:
     rnd_update_proportion: float = 0.25  # Proportion of data used for RND training
     rnd_gamma: float = 0.99  # Discount factor for intrinsic rewards (non-episodic)
     use_dual_value_heads: bool = True
+
+    # Noisy linear 
+    use_noisy_linear: bool = True
+    noisy_sigma_init: float = 0.5
