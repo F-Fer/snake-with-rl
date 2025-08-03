@@ -1,5 +1,5 @@
 import gymnasium as gym
-from training.lib.atari_config import Config
+from lib.atari_config import Config
 from snake_env.snake_env import SnakeEnv
 from typing import Callable
 

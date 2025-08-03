@@ -10,9 +10,9 @@ from typing import Tuple
 import gymnasium as gym
 import time
 
-from training.lib.atari_config import Config
-from training.lib.atari_model import SimpleModel, RNDModule
-from training.lib.env_wrappers import make_env
+from lib.atari_config import Config
+from lib.atari_model import SimpleModel, RNDModule
+from lib.env_wrappers import make_env
 
 def compute_gae(rewards, values, next_value, dones, gamma, gae_lambda, device):
     advantages = torch.zeros_like(rewards).to(device)
@@ -163,14 +163,16 @@ if __name__ == "__main__":
             done = np.logical_or(terminated, truncated)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
 
+            next_obs_tensor = torch.Tensor(next_obs).to(device)
+
             # Compute intrinsic reward (RND)
             if config.rnd_enabled:
                 with torch.no_grad():
-                    intrinsic_reward = rnd_module(next_obs)
+                    intrinsic_reward = rnd_module(next_obs_tensor)
                     intrinsic_reward = config.rnd_intrinsic_coef * intrinsic_reward
                     rewards_int[step] = intrinsic_reward.view(-1)
 
-            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
+            next_obs, next_done = next_obs_tensor, torch.Tensor(done).to(device)
 
             # info is a dict of lists, each list entry containing the episode info for the corresponding environment\
             if "episode_done" in info.keys() and "episode_length" in info.keys() and "episode_return" in info.keys():

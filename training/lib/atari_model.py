@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import gymnasium as gym
-from training.lib.atari_config import Config
+from lib.atari_config import Config
 from torch.distributions import TransformedDistribution, TanhTransform, Independent, Normal
 
 
