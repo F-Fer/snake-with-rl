@@ -98,7 +98,7 @@ class SimpleModel(nn.Module):
         LinearCls = NoisyLinear if config.use_noisy_linear else nn.Linear
 
         self.actor_mean = LinearCls(self.config.d_model, self.config.action_dim) # Outputs for means
-        self.actor_logstd = nn.Parameter(torch.ones(1, self.config.action_dim) * 0.5) # Start with log_std = 1
+        self.actor_logstd = nn.Parameter(torch.ones(1, self.config.action_dim) * config.log_std_start) # Start with log_std = 1
         
         if self.config.use_dual_value_heads:
             self.critic_ext = LinearCls(self.config.d_model, 1)  # Extrinsic value head
@@ -140,8 +140,10 @@ class SimpleModel(nn.Module):
         # Get action mean
         action_mean = self.actor_mean(x)
 
-        # Get action logstd (state independent)
+        # Get action logstd (state independent) with clipping for numerical stability
         action_logstd = self.actor_logstd.expand_as(action_mean)
+        # Clip log_std to prevent numerical instability
+        action_logstd = torch.clamp(action_logstd, min=self.config.log_std_min, max=self.config.log_std_max)
         action_std = torch.exp(action_logstd)
         # Create normal distribution
         base_dist = Independent(Normal(action_mean, action_std), 1)

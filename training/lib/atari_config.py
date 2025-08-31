@@ -24,6 +24,9 @@ class Config:
     
     # Action space
     action_dim: int = 2  # 2 for sine (mean, std), 2 for cosine (mean, std)
+    log_std_min: float = -20.0
+    log_std_max: float = 6.0
+    log_std_start: float = 4.0  
     
     # PPO hyperparameters
     learning_rate: float = 3e-4
@@ -78,7 +81,7 @@ class Config:
     # RND (Random Network Distillation) parameters
     rnd_enabled: bool = True
     rnd_learning_rate: float = 1e-4
-    rnd_intrinsic_coef: float = 2.0  
+    rnd_intrinsic_coef: float = 4.0  
     rnd_update_proportion: float = 0.25  # Proportion of data used for RND training
     rnd_gamma: float = 0.99  # Discount factor for intrinsic rewards (non-episodic)
     use_dual_value_heads: bool = True
