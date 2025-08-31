@@ -1,16 +1,26 @@
 import gymnasium as gym
 import pygame
-from src.snake_env.envs.snake_env import SnakeEnv
+from src.snake_env.snake_env import SnakeEnv
 import time
 import math
 import numpy as np
+import os
 
 def play_snake():
     display_width = 448  
     display_height = 448
 
-    env = gym.make('Snake-v0', screen_width=display_width, screen_height=display_height)
+    # Create the environment directly
+    env = SnakeEnv(screen_width=display_width, screen_height=display_height)
+    
+    # Quit pygame that was initialized with dummy driver
+    pygame.quit()
+    
+    # Remove the dummy video driver setting
+    if "SDL_VIDEODRIVER" in os.environ:
+        del os.environ["SDL_VIDEODRIVER"]
 
+    # Now properly initialize pygame for display
     pygame.init()
     screen = pygame.display.set_mode((display_width, display_height))
     pygame.display.set_caption("Snake RL Environment Viewer")

@@ -1,6 +1,10 @@
-# Snake.io Gymnasium Environment
+# Slither.io Gymnasium Environment
 
-This project implements a Gymnasium environment for a Snake.io-style game, designed for training Reinforcement Learning models. It features continuous movement, enemy bots, dynamic camera, and a Slither.io-like gameplay experience.
+This project implements a Gymnasium environment for a Slither.io-style game, designed for training Reinforcement Learning models. It features continuous movement, and enemy bots. 
+
+As part of the project I also trained several rl-algorithms on the environment, including PPO with random network distillation for intrinsic rewards.
+
+![Slither RL Thumbnail](./images/slither-rl-thumbnail.png)
 
 ## Installation
 

@@ -14,7 +14,7 @@ from torch import nn
 import typing as tt
 from training.lib.model import ImpalaModel
 import multiprocessing
-from snake_env.envs.snake_env import SnakeEnv
+from snake_env.snake_env import SnakeEnv
 from torchrl.envs.libs.gym import GymWrapper
 from torchrl.envs.transforms import ToTensorImage, TransformedEnv, Resize, FrameSkipTransform, GrayScale, CatFrames
 from tensordict.nn import TensorDictModule

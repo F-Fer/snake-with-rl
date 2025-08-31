@@ -25,6 +25,9 @@ class Config:
     
     # Action space
     action_dim: int = 2  # 2 for sine (mean, std), 2 for cosine (mean, std)
+    log_std_min: float = -20.0
+    log_std_max: float = 6.0
+    log_std_start: float = 4.0  
     
     # PPO hyperparameters
     learning_rate: float = 3e-4
@@ -34,8 +37,7 @@ class Config:
     clip_epsilon: float = 0.1
     clip_vloss: bool = True
     value_coef: float = 0.5
-    entropy_coef: float = 0.04
-    entropy_coef_anneal: bool = True
+    entropy_coef: float = 0.01  
     max_grad_norm: float = 0.5
     norm_adv: bool = True
     
@@ -76,3 +78,22 @@ class Config:
     world_size: int = 3000
     num_bots: int = 8
     num_foods: int = 150
+
+    # RND (Random Network Distillation) parameters
+    rnd_enabled: bool = True
+    rnd_learning_rate: float = 1e-4
+    rnd_intrinsic_coef: float = 4.0  
+    rnd_update_proportion: float = 0.25  # Proportion of data used for RND training
+    rnd_gamma: float = 0.99  # Discount factor for intrinsic rewards (non-episodic)
+    use_dual_value_heads: bool = True
+    rnd_clip_intrinsic_reward: float = 5.0  
+
+    # Noisy linear 
+    use_noisy_linear: bool = True
+    noisy_sigma_init: float = 2.0
+    
+    # Exploration decay
+    anneal_entropy_coef: bool = True  # Whether to decay entropy coefficient
+    min_entropy_coef: float = 0.001  # Minimum entropy coefficient after decay
+    anneal_rnd_coef: bool = True  # Whether to decay RND intrinsic coefficient
+    min_rnd_intrinsic_coef: float = 0.2  # Minimum RND coefficient after decay
