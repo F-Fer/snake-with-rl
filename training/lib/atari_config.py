@@ -3,16 +3,19 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Config:
-    # Output dimensions
-    output_width: int = 112 # downsample from original 
-    output_height: int = 112
+    # Observation dimensions
+    output_width: int = 84 # downsample from original 
+    output_height: int = 84
+    n_channels: int = 1
+    frame_stack: int = 5
+
+    # Action dimensions
+    action_dim: int = 2
+    continuous_action: bool = False
 
     # Environment
-    n_channels: int = 1
-    frame_stack: int = 5  # N frames to stack
+    env_name: str = "Snake-v0"
     frame_skip: int = 4  # Repeat each action for this many frames
-    frame_width: int = 448 # output_width * 8
-    frame_height: int = 448 # output_height * 8
     
     # Model architecture (adapted from ViNT)
     d_model: int = 512

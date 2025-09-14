@@ -2,6 +2,9 @@ import gymnasium as gym
 from lib.atari_config import Config
 from snake_env.snake_env import SnakeEnv
 from typing import Callable
+import logging
+
+logger = logging.getLogger(__name__)
 
 class FrameSkipWrapper(gym.Wrapper):
     """Repeat the same action for `skip` frames and accumulate rewards."""
@@ -65,7 +68,7 @@ def make_env(config: Config, seed: int, idx: int, run_name: str) -> Callable:
     """Create environment factory"""
     def _init():
         env = gym.make(
-            'Snake-v0', 
+            "Snake-v0", 
             screen_width=config.frame_width, 
             screen_height=config.frame_height, 
             zoom_level=1.0, 
@@ -82,6 +85,18 @@ def make_env(config: Config, seed: int, idx: int, run_name: str) -> Callable:
         env = gym.wrappers.ResizeObservation(env, (config.output_height, config.output_width))
         if config.gray_scale:
             env = gym.wrappers.GrayscaleObservation(env, keep_dim=True)
+        env = gym.wrappers.FrameStackObservation(env, config.frame_stack)
+        return env
+    return _init
+
+def make_atari_env(config: Config) -> Callable:
+    """Create environment factory"""
+    def _init():
+        logger.debug(f"Making environment {config.env_name}")
+        env = gym.make(config.env_name)
+        if config.gray_scale:
+            env = gym.wrappers.GrayscaleObservation(env, keep_dim=True)
+        env = gym.wrappers.ResizeObservation(env, (config.output_height, config.output_width))
         env = gym.wrappers.FrameStackObservation(env, config.frame_stack)
         return env
     return _init
