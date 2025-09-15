@@ -94,9 +94,9 @@ def make_atari_env(config: Config) -> Callable:
     def _init():
         logger.debug(f"Making environment {config.env_name}")
         env = gym.make(config.env_name)
+        env = gym.wrappers.ResizeObservation(env, (config.output_height, config.output_width))
         if config.gray_scale:
             env = gym.wrappers.GrayscaleObservation(env, keep_dim=True)
-        env = gym.wrappers.ResizeObservation(env, (config.output_height, config.output_width))
         env = gym.wrappers.FrameStackObservation(env, config.frame_stack)
         return env
     return _init

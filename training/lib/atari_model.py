@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import gymnasium as gym
 from lib.atari_config import Config
-from torch.distributions import TransformedDistribution, TanhTransform, Independent, Normal
+from torch.distributions import TransformedDistribution, TanhTransform, Independent, Normal, Categorical
 from lib.noisy import NoisyLinear
 
 def calculate_conv_output_size(input_size, kernel_size, stride, padding=0):
@@ -97,8 +97,16 @@ class SimpleModel(nn.Module):
 
         LinearCls = NoisyLinear if config.use_noisy_linear else nn.Linear
 
-        self.actor_mean = LinearCls(self.config.d_model, self.config.action_dim) # Outputs for means
-        self.actor_logstd = nn.Parameter(torch.ones(1, self.config.action_dim) * config.log_std_start) # Start with log_std = 1
+        if self.config.continuous_action:
+            # Continuous policy: mean vector and state-independent log std
+            self.actor_loc = LinearCls(self.config.d_model, self.config.action_dim)
+            self.actor_logstd = nn.Parameter(
+                torch.ones(1, self.config.action_dim) * config.log_std_start
+            )
+        else:
+            # Discrete policy: logits over actions
+            self.actor_logits = LinearCls(self.config.d_model, self.config.action_dim)
+
         
         if self.config.use_dual_value_heads:
             self.critic_ext = LinearCls(self.config.d_model, 1)  # Extrinsic value head
@@ -137,33 +145,49 @@ class SimpleModel(nn.Module):
 
         x = self.base_model(x)
 
-        # Get action mean
-        action_mean = self.actor_mean(x)
+        if self.config.continuous_action:
+            # Continuous action policy: Tanh-Normal
+            action_loc = self.actor_loc(x)
+            action_logstd = self.actor_logstd.expand_as(action_loc)
+            action_logstd = torch.clamp(
+                action_logstd,
+                min=self.config.log_std_min,
+                max=self.config.log_std_max,
+            )
+            action_std = torch.exp(action_logstd)
+            base_dist = Independent(Normal(action_loc, action_std), 1)
+            dist = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
 
-        # Get action logstd (state independent) with clipping for numerical stability
-        action_logstd = self.actor_logstd.expand_as(action_mean)
-        # Clip log_std to prevent numerical instability
-        action_logstd = torch.clamp(action_logstd, min=self.config.log_std_min, max=self.config.log_std_max)
-        action_std = torch.exp(action_logstd)
-        # Create normal distribution
-        base_dist = Independent(Normal(action_mean, action_std), 1)
-        probs = TransformedDistribution(base_dist, [TanhTransform(cache_size=1)])
+            if action is None:
+                action = dist.sample()
+            else:
+                eps = 1e-6
+                action = action.clamp(-1 + eps, 1 - eps)
 
-        # Sample action if not provided, otherwise ensure provided action is within valid bounds
-        if action is None:
-            action = probs.sample()
+            logprob = dist.log_prob(action)
+            entropy = base_dist.entropy()
         else:
-            eps = 1e-6
-            action = action.clamp(-1 + eps, 1 - eps)
+            # Discrete action policy: Categorical over logits
+            logits = self.actor_logits(x)
+            dist = Categorical(logits=logits)
+
+            if action is None:
+                action = dist.sample()
+            else:
+                action = action.long()
+
+            # log_prob expects shape (batch,)
+            logprob = dist.log_prob(action)
+            entropy = dist.entropy()
 
         if self.config.use_dual_value_heads:
             value_ext = self.critic_ext(x)
             value_int = self.critic_int(x)
             value = value_ext + value_int
-            return action, probs.log_prob(action), base_dist.entropy(), value, value_ext, value_int
+            return action, logprob, entropy, value, value_ext, value_int
         else:
             value = self.critic(x)
-            return action, probs.log_prob(action), base_dist.entropy(), value
+            return action, logprob, entropy, value
         
     def reset_noise(self):
         """Reset the noise of the actor and critic networks"""

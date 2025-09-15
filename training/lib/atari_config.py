@@ -16,6 +16,8 @@ class Config:
     # Environment
     env_name: str = "Snake-v0"
     frame_skip: int = 4  # Repeat each action for this many frames
+    frame_width: int = 448
+    frame_height: int = 448
     
     # Model architecture (adapted from ViNT)
     d_model: int = 512

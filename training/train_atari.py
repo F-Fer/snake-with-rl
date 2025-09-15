@@ -70,17 +70,27 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if config.cuda and torch.cuda.is_available() else "cpu")
 
+    # Create vector environment
     envs = gym.vector.SyncVectorEnv(
         [make_atari_env(config) for i in range(config.n_envs)],
         autoreset_mode=gym.vector.AutoresetMode.NEXT_STEP
     )
 
-    print(envs.single_observation_space.shape)
-    print(envs.action_space)
- 
-    config.n_channels = envs.single_observation_space.shape[0]
-    config.action_dim = envs.action_space.shape[0]
+    logger.debug(f"Observation space: {envs.single_observation_space}")
+    logger.debug(f"Action space: {envs.single_action_space}")
 
+    # Determine if action space is discrete or continuous
+    is_continuous = isinstance(envs.single_action_space, gym.spaces.Box)
+    if is_continuous:
+        config.action_dim = envs.single_action_space.shape[0]
+        config.continuous_action = True
+    else:
+        config.action_dim = envs.single_action_space.n
+        config.continuous_action = False
+ 
+    logger.debug(f"Action dimension: {config.action_dim}")
+
+    # Create agent
     agent = SimpleModel(config).to(device)
     if config.rnd_enabled:
         rnd_module = RNDModule(config).to(device)
@@ -89,15 +99,18 @@ if __name__ == "__main__":
         rnd_module = None
         rnd_optimizer = None
 
+    # Load model if provided
     if args.model is not None:
         agent.load_state_dict(torch.load(args.model))
+    
+    # Set agent to train mode
     agent.train()
 
     optimizer = optim.Adam(agent.parameters(), lr=config.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((config.n_steps, config.n_envs) + envs.single_observation_space.shape).to(device)
-    actions = torch.zeros((config.n_steps, config.n_envs) + envs.single_action_space.shape).to(device)
+    actions = torch.zeros((config.n_steps, config.n_envs) + envs.single_action_space.shape).to(device) # If continuous, this will be a tensor of shape (config.n_steps, config.n_envs, config.action_dim), else a tensor of shape (config.n_steps, config.n_envs)
     logprobs = torch.zeros((config.n_steps, config.n_envs)).to(device)
     rewards = torch.zeros((config.n_steps, config.n_envs)).to(device) # Extrinsic rewards
     dones = torch.zeros((config.n_steps, config.n_envs)).to(device)
@@ -121,6 +134,7 @@ if __name__ == "__main__":
     for update in range(1, num_updates + 1):
         agent.reset_noise()
         
+        # Decay learning rate
         if config.anneal_lr:
             frac = 1.0 - (update - 1.0) / num_updates
             lrnow = frac * config.learning_rate
@@ -143,7 +157,7 @@ if __name__ == "__main__":
 
         # Collect rollouts
         for step in range(config.n_steps):
-            global_step += 1 * config.n_envs
+            global_step += config.n_envs
 
             obs[step] = next_obs
             dones[step] = next_done
@@ -190,6 +204,7 @@ if __name__ == "__main__":
                 else:
                     action, logprob, _, value = agent.get_action_and_value(next_obs)
                     values[step] = value.flatten()
+            
             actions[step] = action
             logprobs[step] = logprob
 
@@ -371,7 +386,8 @@ if __name__ == "__main__":
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-        writer.add_scalar("charts/action_std", agent.actor_logstd.exp().mean().item(), global_step)
+        if config.continuous_action:
+            writer.add_scalar("charts/action_std", agent.actor_logstd.exp().mean().item(), global_step)
         writer.add_scalar("charts/entropy_coef", current_entropy_coef, global_step)
         if config.rnd_enabled:
             writer.add_scalar("charts/rnd_intrinsic_coef", current_rnd_coef, global_step)
