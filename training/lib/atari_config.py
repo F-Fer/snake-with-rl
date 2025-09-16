@@ -51,7 +51,7 @@ class Config:
     ppo_epochs: int = 15
     n_envs: int = 16
     n_steps: int = 1_024
-    total_timesteps: int = 2_000_000
+    total_timesteps: int = 1_000_000
     batch_size: int = int(n_steps * n_envs)
     
     # Logging
@@ -85,7 +85,7 @@ class Config:
     num_foods: int = 150
 
     # RND (Random Network Distillation) parameters
-    rnd_enabled: bool = True
+    rnd_enabled: bool = False
     rnd_learning_rate: float = 1e-4
     rnd_intrinsic_coef: float = 4.0  
     rnd_update_proportion: float = 0.25  # Proportion of data used for RND training
@@ -94,11 +94,11 @@ class Config:
     rnd_clip_intrinsic_reward: float = 5.0  
 
     # Noisy linear 
-    use_noisy_linear: bool = True
+    use_noisy_linear: bool = False
     noisy_sigma_init: float = 2.0
     
     # Exploration decay
-    anneal_entropy_coef: bool = True  # Whether to decay entropy coefficient
+    anneal_entropy_coef: bool = False  # Whether to decay entropy coefficient
     min_entropy_coef: float = 0.001  # Minimum entropy coefficient after decay
     anneal_rnd_coef: bool = True  # Whether to decay RND intrinsic coefficient
     min_rnd_intrinsic_coef: float = 0.2  # Minimum RND coefficient after decay

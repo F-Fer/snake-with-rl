@@ -108,7 +108,7 @@ class SimpleModel(nn.Module):
             self.actor_logits = LinearCls(self.config.d_model, self.config.action_dim)
 
         
-        if self.config.use_dual_value_heads:
+        if self.config.use_dual_value_heads and self.config.rnd_enabled:
             self.critic_ext = LinearCls(self.config.d_model, 1)  # Extrinsic value head
             self.critic_int = LinearCls(self.config.d_model, 1)  # Intrinsic value head
         else:
@@ -119,7 +119,7 @@ class SimpleModel(nn.Module):
         x: tensor of shape [batch_size, seq_len, frame_height, frame_width, n_channels]
         """
         x = self.base_model(x)
-        if self.config.use_dual_value_heads:
+        if self.config.use_dual_value_heads and self.config.rnd_enabled:
             return self.critic_ext(x), self.critic_int(x)
         else:
             return self.critic(x)
@@ -180,7 +180,7 @@ class SimpleModel(nn.Module):
             logprob = dist.log_prob(action)
             entropy = dist.entropy()
 
-        if self.config.use_dual_value_heads:
+        if self.config.use_dual_value_heads and self.config.rnd_enabled:
             value_ext = self.critic_ext(x)
             value_int = self.critic_int(x)
             value = value_ext + value_int

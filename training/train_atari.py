@@ -274,7 +274,7 @@ if __name__ == "__main__":
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
-        if config.use_dual_value_heads:
+        if config.use_dual_value_heads and config.rnd_enabled:
             b_returns_ext = returns_ext.reshape(-1)
             b_returns_int = returns_int.reshape(-1)
             b_values_ext = values_ext.reshape(-1)
@@ -289,7 +289,7 @@ if __name__ == "__main__":
                 end = start + config.mini_batch_size
                 mb_inds = b_inds[start:end]
 
-                if config.use_dual_value_heads:
+                if config.use_dual_value_heads and config.rnd_enabled:
                     _, newlogprob, entropy, _, newvalue_ext, newvalue_int = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
                     newvalue = newvalue_ext + newvalue_int
                 else:
@@ -314,7 +314,7 @@ if __name__ == "__main__":
 
                 # Value loss
                 newvalue = newvalue.view(-1)
-                if config.use_dual_value_heads:
+                if config.use_dual_value_heads and config.rnd_enabled:
                     if config.clip_vloss:
                         # For dual heads, compute separate losses but don't clip them separately
                         v_loss_ext = 0.5 * ((newvalue_ext.view(-1) - b_returns_ext[mb_inds]) ** 2).mean()
