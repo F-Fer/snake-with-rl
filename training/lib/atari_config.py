@@ -14,7 +14,7 @@ class Config:
     continuous_action: bool = False
 
     # Environment
-    env_name: str = "Snake-v0"
+    env_name: str = "ALE/Pong-v5" # "Snake-v0"
     frame_skip: int = 4  # Repeat each action for this many frames
     frame_width: int = 448
     frame_height: int = 448

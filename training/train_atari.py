@@ -11,6 +11,7 @@ from typing import Tuple
 import gymnasium as gym
 import time
 import logging
+import tqdm
 
 from lib.atari_config import Config
 from lib.atari_model import SimpleModel, RNDModule
@@ -21,6 +22,15 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Filter to allow only our project's loggers
+class _ProjectOnlyFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name.startswith(("__main__", "lib", "training", "snake_env"))
+
+# Attach filter to all existing handlers (root handlers from basicConfig)
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_ProjectOnlyFilter())
 
 def compute_gae(rewards, values, next_value, dones, gamma, gae_lambda, device):
     advantages = torch.zeros_like(rewards).to(device)
@@ -101,7 +111,11 @@ if __name__ == "__main__":
 
     # Load model if provided
     if args.model is not None:
-        agent.load_state_dict(torch.load(args.model))
+        try:
+            agent.load_state_dict(torch.load(args.model))
+        except Exception as e:
+            logger.error(f"Error loading model: {e}")
+            raise e
     
     # Set agent to train mode
     agent.train()
@@ -131,9 +145,11 @@ if __name__ == "__main__":
     next_done = torch.zeros(config.n_envs).to(device)
     num_updates = config.total_timesteps // config.batch_size
 
+    pbar = tqdm.tqdm(total=num_updates, desc="Training")
+
     for update in range(1, num_updates + 1):
+        pbar.update(1)
         agent.reset_noise()
-        
         # Decay learning rate
         if config.anneal_lr:
             frac = 1.0 - (update - 1.0) / num_updates
@@ -241,7 +257,6 @@ if __name__ == "__main__":
                             writer.add_scalar("charts/episodic_length", episode_lengths[i], global_step)
                             break
             
-
         # Advantages and returns
         if config.rnd_enabled and config.use_dual_value_heads:
             with torch.no_grad():
@@ -391,7 +406,6 @@ if __name__ == "__main__":
         writer.add_scalar("charts/entropy_coef", current_entropy_coef, global_step)
         if config.rnd_enabled:
             writer.add_scalar("charts/rnd_intrinsic_coef", current_rnd_coef, global_step)
-
         if config.rnd_enabled:
             writer.add_scalar("rnd/intrinsic_reward_mean", rewards_int.mean().item(), global_step)
             writer.add_scalar("rnd/intrinsic_reward_std", rewards_int.std().item(), global_step)
