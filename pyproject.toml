@@ -9,6 +9,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "ale-py>=0.11.2",
     "efficientnet-pytorch>=0.7.1",
     "gymnasium[mujoco,other]>=0.28.1",
     "imageio[ffmpeg]>=2.37.0",

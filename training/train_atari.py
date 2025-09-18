@@ -5,17 +5,19 @@ import torch.optim as optim
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import os
-from datetime import datetime
 import argparse
-from typing import Tuple
 import gymnasium as gym
 import time
 import logging
 import tqdm
+import warnings
 
 from lib.atari_config import Config
 from lib.atari_model import SimpleModel, RNDModule
 from lib.env_wrappers import make_atari_env
+
+# Suppress moviepy syntax warnings
+warnings.filterwarnings("ignore", category=SyntaxWarning, module="moviepy")
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -78,7 +80,14 @@ if __name__ == "__main__":
     torch.manual_seed(config.seed)
     torch.backends.cudnn.deterministic = config.torch_deterministic
 
-    device = torch.device("cuda" if config.cuda and torch.cuda.is_available() else "cpu")
+    # Determine device
+    if config.gpu and torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif config.gpu and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+    logger.info(f"Using device: {device}")
 
     # Create vector environment
     envs = gym.vector.SyncVectorEnv(
@@ -141,7 +150,7 @@ if __name__ == "__main__":
     global_step = 0
     start_time = time.time()
     next_obs, _ = envs.reset()
-    next_obs = torch.Tensor(next_obs).to(device)
+    next_obs = torch.tensor(next_obs, dtype=torch.float32).to(device)
     next_done = torch.zeros(config.n_envs).to(device)
     num_updates = config.total_timesteps // config.batch_size
 
@@ -227,9 +236,9 @@ if __name__ == "__main__":
             # Execute the game and log data.
             next_obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
-            rewards[step] = torch.tensor(reward).to(device).view(-1)
+            rewards[step] = torch.tensor(reward, dtype=torch.float32).to(device).view(-1)
 
-            next_obs_tensor = torch.Tensor(next_obs).to(device)
+            next_obs_tensor = torch.tensor(next_obs, dtype=torch.float32).to(device)
 
             # Compute intrinsic reward (RND)
             if config.rnd_enabled:
@@ -241,7 +250,7 @@ if __name__ == "__main__":
                     intrinsic_reward = current_rnd_coef * intrinsic_reward
                     rewards_int[step] = intrinsic_reward.view(-1)
 
-            next_obs, next_done = next_obs_tensor, torch.Tensor(done).to(device)
+            next_obs, next_done = next_obs_tensor, torch.tensor(done, dtype=torch.float32).to(device)
 
             # info is a dict of lists, each list entry containing the episode info for the corresponding environment\
             if "episode_done" in info.keys() and "episode_length" in info.keys() and "episode_return" in info.keys():

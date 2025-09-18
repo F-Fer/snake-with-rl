@@ -64,7 +64,7 @@ class Config:
     torch_deterministic: bool = True
 
     # GPU
-    cuda: bool = True
+    gpu: bool = True # Try cuda, then try mps, finally cpu
 
     # Video recording
     record_video: bool = True
