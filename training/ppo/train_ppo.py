@@ -11,14 +11,12 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 from tqdm import tqdm
 import torch
 from torch import nn
-import typing as tt
 from training.lib.model import ImpalaModel
 import multiprocessing
 from snake_env.snake_env import SnakeEnv
 from torchrl.envs.libs.gym import GymWrapper
-from torchrl.envs.transforms import ToTensorImage, TransformedEnv, Resize, FrameSkipTransform, GrayScale, CatFrames
+from torchrl.envs.transforms import ToTensorImage, TransformedEnv, Resize, FrameSkipTransform, CatFrames
 from tensordict.nn import TensorDictModule
-from tensordict.nn.distributions import NormalParamExtractor
 import torch.optim as optim
 from torchrl.collectors import SyncDataCollector
 from torchrl.objectives import ClipPPOLoss
@@ -126,7 +124,6 @@ def main():
     # Define the transforms to apply to the environment
     frameskip_transform = FrameSkipTransform(4)
     resize_transform = Resize(84)
-    grayscale_transform = GrayScale()
 
     env = TransformedEnv(env, Compose(
         frameskip_transform,

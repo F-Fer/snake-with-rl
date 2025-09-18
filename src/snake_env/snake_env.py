@@ -2,7 +2,6 @@ import gymnasium as gym
 import numpy as np
 import pygame
 from gymnasium import spaces
-import random
 import math
 import colorsys
 
@@ -571,14 +570,11 @@ class SnakeEnv(gym.Env):
             self.previous_nearest_food_distance = nearest_food_distance
             
         # Check for food collection by player
-        food_eaten = False
-        
         for i, (food_x, food_y) in enumerate(self.food_positions[:]):
             food_distance = math.sqrt((head_x - food_x)**2 + (head_y - food_y)**2)
             
             if food_distance < self.snake_segment_radius + self.food_radius:
                 self.score += 1
-                food_eaten = True
                 
                 # Remove the eaten food
                 self.food_positions.pop(i)

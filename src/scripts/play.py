@@ -1,4 +1,3 @@
-import gymnasium as gym
 import pygame
 from src.snake_env.snake_env import SnakeEnv
 import time

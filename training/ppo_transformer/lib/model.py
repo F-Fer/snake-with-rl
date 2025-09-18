@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 from torch.distributions import Normal
 from efficientnet_pytorch import EfficientNet
-from torch.distributions import TransformedDistribution, TanhTransform, Independent, Normal
+from torch.distributions import TransformedDistribution, TanhTransform, Independent
 from torchvision import transforms
 
 from training.lib.atari_config import Config

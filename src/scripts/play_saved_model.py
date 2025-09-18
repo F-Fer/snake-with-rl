@@ -1,7 +1,6 @@
 import argparse
 import os
 import time
-from collections import deque
 
 import cv2
 import imageio
@@ -10,7 +9,6 @@ import torch
 import pygame
 
 from training.lib.atari_config import Config
-from training.ppo_transformer.lib.model import ViNTActorCritic
 from training.ppo_transformer.lib.simple_model import SimpleModel
 from training.lib.env_wrappers import make_env
 from snake_env.snake_env import SnakeEnv

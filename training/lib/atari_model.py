@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import gymnasium as gym
 from lib.atari_config import Config
 from torch.distributions import TransformedDistribution, TanhTransform, Independent, Normal, Categorical
 from lib.noisy import NoisyLinear
