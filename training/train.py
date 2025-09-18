@@ -14,7 +14,7 @@ import warnings
 
 from lib.atari_config import Config
 from lib.atari_model import SimpleModel, RNDModule
-from lib.env_wrappers import make_atari_env
+from lib.env_wrappers import make_atari_env, make_env
 
 # Suppress moviepy syntax warnings
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="moviepy")
@@ -24,6 +24,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Register ALE environments
+gym.register_envs(ale)
 
 # Filter to allow only our project's loggers
 class _ProjectOnlyFilter(logging.Filter):
@@ -58,8 +61,6 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
 
-    gym.register_envs(ale)
-
     run_name = f"ppo_run_{int(time.time())}"
     logger.info(f"Run name: {run_name}")
     
@@ -89,9 +90,10 @@ if __name__ == "__main__":
         device = torch.device("cpu")
     logger.info(f"Using device: {device}")
 
+    env_create_fn = make_env if config.env_name.startswith("Snake") else make_atari_env
     # Create vector environment
     envs = gym.vector.SyncVectorEnv(
-        [make_atari_env(config) for i in range(config.n_envs)],
+        [env_create_fn(config) for i in range(config.n_envs)],
         autoreset_mode=gym.vector.AutoresetMode.NEXT_STEP
     )
 
