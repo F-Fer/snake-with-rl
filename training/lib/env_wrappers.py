@@ -81,6 +81,8 @@ def make_env(config: Config, seed: int, idx: int, run_name: str) -> Callable:
 
         # Apply frameskip before other wrappers so they operate on skipped observations
         env = FrameSkipWrapper(env, skip=config.frame_skip)
+        # Track episodic returns/lengths in info/final_info
+        env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ResizeObservation(env, (config.output_height, config.output_width))
         if config.gray_scale:
             env = gym.wrappers.GrayscaleObservation(env, keep_dim=True)
@@ -88,11 +90,14 @@ def make_env(config: Config, seed: int, idx: int, run_name: str) -> Callable:
         return env
     return _init
 
+
 def make_atari_env(config: Config) -> Callable:
     """Create environment factory"""
     def _init():
         logger.debug(f"Making environment {config.env_name}")
         env = gym.make(config.env_name)
+        # Track episodic returns/lengths in info/final_info
+        env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ResizeObservation(env, (config.output_height, config.output_width))
         if config.gray_scale:
             env = gym.wrappers.GrayscaleObservation(env, keep_dim=True)

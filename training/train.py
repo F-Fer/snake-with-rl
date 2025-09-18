@@ -255,18 +255,82 @@ if __name__ == "__main__":
             next_obs, next_done = next_obs_tensor, torch.tensor(done, dtype=torch.float32).to(device)
 
             # info is a dict of lists, each list entry containing the episode info for the corresponding environment\
-            if "episode_done" in info.keys() and "episode_length" in info.keys() and "episode_return" in info.keys():
-                done_idx = info["episode_done"]
-                episode_lengths = info["episode_length"]
-                episode_returns = info["episode_return"]
-                if np.any(done_idx):
+            # Generalized episodic logging: supports Gymnasium RecordEpisodeStatistics and Snake fallback
+            try:
+                logged = False
+                # 1) Vector env with autoreset: look for final_info[i]['episode']
+                if isinstance(info, dict) and "final_info" in info:
+                    final_infos = info["final_info"]
                     for i in range(config.n_envs):
-                        if done_idx[i]:
-                            # Only log the first episode that terminates
-                            print(f"global_step={global_step}, episodic_return={episode_returns[i]}, episodic_length={episode_lengths[i]}")
-                            writer.add_scalar("charts/episodic_return", episode_returns[i], global_step)
-                            writer.add_scalar("charts/episodic_length", episode_lengths[i], global_step)
+                        fi = final_infos[i]
+                        if fi is None:
+                            continue
+                        ep = fi.get("episode") if isinstance(fi, dict) else None
+                        if ep is not None:
+                            ep_return = ep.get("r")
+                            ep_length = ep.get("l")
+                        else:
+                            ep_return = fi.get("episode_return") if isinstance(fi, dict) else None
+                            ep_length = fi.get("episode_length") if isinstance(fi, dict) else None
+                        if ep_return is not None and ep_length is not None:
+                            print(f"global_step={global_step}, episodic_return={ep_return}, episodic_length={ep_length}")
+                            writer.add_scalar("charts/episodic_return", ep_return, global_step)
+                            writer.add_scalar("charts/episodic_length", ep_length, global_step)
+                            logged = True
                             break
+
+                # 2) Vector/non-vector without autoreset: info['episode'] present directly
+                if not logged and isinstance(info, dict) and "episode" in info:
+                    ep_field = info["episode"]
+                    if isinstance(ep_field, dict):
+                        # Vectorized case: 'episode' contains arrays aligned with envs
+                        ep_returns = ep_field.get("r")
+                        ep_lengths = ep_field.get("l")
+                        if ep_returns is not None and ep_lengths is not None:
+                            # Use current step's done mask to select finished env(s)
+                            done_mask = np.logical_or(terminated, truncated)
+                            done_indices = np.nonzero(done_mask)[0]
+                            for i in done_indices:
+                                ep_ret = float(ep_returns[i]) if hasattr(ep_returns, "__len__") else float(ep_returns)
+                                ep_len = int(ep_lengths[i]) if hasattr(ep_lengths, "__len__") else int(ep_lengths)
+                                # Skip invalid zeros (some vector APIs fill zeros for non-terminated envs)
+                                if ep_len > 0:
+                                    logger.debug(f"global_step={global_step}, episodic_return={ep_ret}, episodic_length={ep_len}")
+                                    writer.add_scalar("charts/episodic_return", ep_ret, global_step)
+                                    writer.add_scalar("charts/episodic_length", ep_len, global_step)
+                                    logged = True
+                                    break
+                    else:
+                        # Assume list-like aligned with envs (list of dicts)
+                        for i in range(config.n_envs):
+                            epi = ep_field[i]
+                            if not epi:
+                                continue
+                            ep_return = epi.get("r")
+                            ep_length = epi.get("l")
+                            if ep_return is not None and ep_length is not None:
+                                logger.debug(f"global_step={global_step}, episodic_return={ep_return}, episodic_length={ep_length}")
+                                writer.add_scalar("charts/episodic_return", ep_return, global_step)
+                                writer.add_scalar("charts/episodic_length", ep_length, global_step)
+                                logged = True
+                                break
+
+                # 3) Fallback to custom Snake vector info keys
+                if not logged and isinstance(info, dict) and all(k in info for k in ("episode_done", "episode_length", "episode_return")):
+                    done_idx = info["episode_done"]
+                    episode_lengths = info["episode_length"]
+                    episode_returns = info["episode_return"]
+                    # done_idx may be list/array of bools
+                    if np.any(done_idx):
+                        for i in range(config.n_envs):
+                            if done_idx[i]:
+                                logger.debug(f"global_step={global_step}, episodic_return={episode_returns[i]}, episodic_length={episode_lengths[i]}")
+                                writer.add_scalar("charts/episodic_return", episode_returns[i], global_step)
+                                writer.add_scalar("charts/episodic_length", episode_lengths[i], global_step)
+                                logged = True
+                                break
+            except Exception as _e:
+                pass
             
         # Advantages and returns
         if config.rnd_enabled and config.use_dual_value_heads:
